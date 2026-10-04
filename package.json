@@ -1,0 +1,16 @@
+{
+  "name": "choobs",
+  "version": "0.1.0",
+  "description": "Choobs VPN client for Windows 7",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "preview": "node scripts/preview-server.js"
+  },
+  "devDependencies": {
+    "electron": "22.3.27"
+  },
+  "allowScripts": {
+    "electron@22.3.27": true
+  }
+}

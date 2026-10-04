@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#111315">
+  <title>Choobs</title>
+  <link rel="stylesheet" href="./css/style.css">
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <div class="brand" aria-label="Choobs">
+        <span class="brand-indicator" aria-hidden="true"></span>
+        <span>Choobs</span>
+      </div>
+      <button class="settings-button" id="settingsButton" type="button" aria-label="Settings" title="Settings">⚙</button>
+    </header>
+
+    <section class="connection" aria-label="VPN connection">
+      <div class="connection-orbit">
+        <button class="connect-button" id="connectButton" type="button" aria-pressed="false">CONNECT</button>
+      </div>
+      <div class="status" id="status" aria-live="polite">Not connected</div>
+      <div class="selected-server">
+        <span class="selected-label">SELECTED LOCATION</span>
+        <span class="selected-location" id="selectedServer"></span>
+      </div>
+    </section>
+
+    <section class="servers" aria-labelledby="serversTitle">
+      <div class="servers-heading">
+        <h1 class="section-title" id="serversTitle">SERVERS</h1>
+        <span class="server-count" id="serverCount"></span>
+      </div>
+      <div class="server-list" id="serverList"></div>
+      <button class="add-server" id="addServer" type="button">
+        <span aria-hidden="true">+</span>
+        <span>Add server</span>
+      </button>
+    </section>
+
+    <footer class="app-footer">
+      <span>Choobs</span>
+      <span>Version 0.1.0</span>
+    </footer>
+  </main>
+
+  <div class="modal-overlay" id="modalOverlay" hidden>
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <header class="modal-header">
+        <h2 class="modal-title" id="modalTitle"></h2>
+        <button class="modal-close" id="modalClose" type="button" aria-label="Close">×</button>
+      </header>
+      <div class="modal-content" id="modalContent"></div>
+      <footer class="modal-actions" id="modalActions"></footer>
+    </section>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+
+  <script src="./js/servers.js"></script>
+  <script src="./js/storage.js"></script>
+  <script src="./js/app.js"></script>
+</body>
+</html>
