@@ -1,21 +1,23 @@
 const fs = require("fs");
 const path = require("path");
-const DEFAULT_SERVERS = require("./app/js/servers");
-
+const DEFAULT_SERVERS = [];
 const PROTOCOLS = ["HTTPS", "SOCKS5", "VLESS", "VMess", "Trojan", "Shadowsocks", "Custom"];
 const CONNECTION_MODES = ["System Proxy", "TUN", "Auto"];
 
 function defaultConfig() {
   return {
-    servers: DEFAULT_SERVERS.map((server) => Object.assign({}, server)),
-    selectedServerId: "nl-amsterdam",
+    servers: [],
+    subscriptions: [],
+    selectedServerId: null,
     settings: {
       startWithWindows: false,
       autoConnect: false,
       minimizeToTray: false,
       connectionMode: "System Proxy",
       rememberSelectedServer: true,
-      connectOnStart: false
+      connectOnStart: false,
+      autoUpdateSubscriptions: false,
+      subscriptionUpdateInterval: "manual"
     }
   };
 }
@@ -24,11 +26,13 @@ function normalizeServer(server, index) {
   if (!server || typeof server !== "object" || Array.isArray(server)) return null;
 
   const name = typeof server.name === "string" ? server.name.trim() : "";
-  const location = typeof server.location === "string" ? server.location.trim() : "";
-  const port = Number(server.port);
-  const protocol = PROTOCOLS.indexOf(server.protocol) !== -1 ? server.protocol : "";
+  const location = typeof server.location === "string" && server.location.trim()
+    ? server.location.trim()
+    : "Location unavailable";
+  const port = typeof server.port === "undefined" ? 443 : Number(server.port);
+  const protocol = PROTOCOLS.indexOf(server.protocol) !== -1 ? server.protocol : "HTTPS";
 
-  if (!name || !location || !Number.isInteger(port) || port < 1 || port > 65535 || !protocol) return null;
+  if (!name || !Number.isInteger(port) || port < 1 || port > 65535) return null;
 
   const ping = server.ping === "" || server.ping === null || typeof server.ping === "undefined"
     ? null
@@ -38,7 +42,7 @@ function normalizeServer(server, index) {
   if (typeof server.address !== "undefined" && typeof server.address !== "string") return null;
   if (typeof server.description !== "undefined" && typeof server.description !== "string") return null;
 
-  return {
+  const normalized = {
     id: typeof server.id === "string" && server.id.trim() ? server.id.trim() : `server-${index + 1}`,
     name,
     location,
@@ -49,6 +53,41 @@ function normalizeServer(server, index) {
     ping,
     description: typeof server.description === "string" ? server.description.trim() : ""
   };
+  if (typeof server.source === "string" && server.source) normalized.source = server.source;
+  if (typeof server.uri === "string" && server.uri) normalized.uri = server.uri;
+  if (server.config && typeof server.config === "object" && !Array.isArray(server.config)) {
+    normalized.config = server.config;
+  }
+  return normalized;
+}
+
+function normalizeSubscription(subscription, index) {
+  if (!subscription || typeof subscription !== "object" || Array.isArray(subscription)) return null;
+  const id = typeof subscription.id === "string" && subscription.id.trim()
+    ? subscription.id.trim()
+    : `subscription-${index + 1}`;
+  const name = typeof subscription.name === "string" ? subscription.name.trim() : "";
+  const url = typeof subscription.url === "string" ? subscription.url.trim() : "";
+  let protocol = "";
+  try {
+    protocol = new URL(url).protocol;
+  } catch (error) {
+    return null;
+  }
+  if (!name || (protocol !== "http:" && protocol !== "https:")) return null;
+
+  const servers = Array.isArray(subscription.servers)
+    ? subscription.servers.map(normalizeServer)
+    : [];
+  if (!servers.every(Boolean)) return null;
+
+  return {
+    id,
+    name,
+    url,
+    updatedAt: typeof subscription.updatedAt === "string" ? subscription.updatedAt : null,
+    servers: servers.map((server) => Object.assign({}, server, { source: id }))
+  };
 }
 
 function normalizeConfig(value) {
@@ -57,19 +96,34 @@ function normalizeConfig(value) {
     return { config: fallback, warning: "Configuration was invalid; default settings were loaded." };
   }
 
-  let servers = fallback.servers;
+  let servers = [];
   let warning = "";
 
-  if (Array.isArray(value.servers) && value.servers.length > 0) {
+  if (Array.isArray(value.servers)) {
     const normalized = value.servers.map(normalizeServer);
     if (normalized.every(Boolean)) {
       servers = normalized;
     } else {
-      warning = "Some saved server data was invalid; default servers were loaded.";
+      warning = "Some saved server data was invalid and was ignored.";
     }
   } else if (typeof value.servers !== "undefined") {
-    warning = "Saved server list was invalid; default servers were loaded.";
+    warning = "Saved server list was invalid and was ignored.";
   }
+
+  let subscriptions = [];
+  if (Array.isArray(value.subscriptions)) {
+    const normalized = value.subscriptions.map(normalizeSubscription);
+    if (normalized.every(Boolean)) {
+      subscriptions = normalized;
+    } else {
+      warning = warning || "Some saved subscriptions were invalid and were ignored.";
+    }
+  }
+  subscriptions.forEach((subscription) => {
+    subscription.servers.forEach((server) => {
+      if (!servers.some((item) => item.id === server.id)) servers.push(server);
+    });
+  });
 
   const ids = {};
   servers = servers.map((server, index) => {
@@ -88,21 +142,34 @@ function normalizeConfig(value) {
     "autoConnect",
     "minimizeToTray",
     "rememberSelectedServer",
-    "connectOnStart"
+    "connectOnStart",
+    "autoUpdateSubscriptions"
   ].forEach((key) => {
     if (typeof inputSettings[key] === "boolean") settings[key] = inputSettings[key];
   });
   if (CONNECTION_MODES.indexOf(inputSettings.connectionMode) !== -1) {
     settings.connectionMode = inputSettings.connectionMode;
   }
+  const updateIntervals = ["manual", "15m", "30m", "1h", "6h", "12h", "24h"];
+  if (updateIntervals.indexOf(inputSettings.subscriptionUpdateInterval) !== -1) {
+    settings.subscriptionUpdateInterval = inputSettings.subscriptionUpdateInterval;
+  }
+
+  servers = servers.map((server) => {
+    const copy = Object.assign({}, server);
+    if (copy.source && !subscriptions.some((subscription) => subscription.id === copy.source)) {
+      delete copy.source;
+    }
+    return copy;
+  });
 
   const selectedServerId = settings.rememberSelectedServer
     && servers.some((server) => server.id === value.selectedServerId)
     ? value.selectedServerId
-    : servers[0].id;
+    : (servers.length ? servers[0].id : null);
 
   return {
-    config: { servers, selectedServerId, settings },
+    config: { servers, subscriptions, selectedServerId, settings },
     warning
   };
 }
@@ -150,5 +217,6 @@ module.exports = {
   PROTOCOLS,
   defaultConfig,
   normalizeConfig,
-  normalizeServer
+  normalizeServer,
+  normalizeSubscription
 };

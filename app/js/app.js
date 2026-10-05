@@ -5,7 +5,9 @@ const connectButton = document.getElementById("connectButton");
 const connectionOrbit = document.querySelector(".connection-orbit");
 const status = document.getElementById("status");
 const settingsButton = document.getElementById("settingsButton");
-const addServerButton = document.getElementById("addServer");
+const addSubscriptionButton = document.getElementById("addSubscription");
+const refreshSubscriptionsButton = document.getElementById("refreshSubscriptions");
+const checkPingsButton = document.getElementById("checkPings");
 const modalOverlay = document.getElementById("modalOverlay");
 const modalTitle = document.getElementById("modalTitle");
 const modalContent = document.getElementById("modalContent");
@@ -37,7 +39,9 @@ function defaultSettings() {
     minimizeToTray: false,
     connectionMode: "System Proxy",
     rememberSelectedServer: true,
-    connectOnStart: false
+    connectOnStart: false,
+    autoUpdateSubscriptions: false,
+    subscriptionUpdateInterval: "manual"
   };
 }
 
@@ -81,30 +85,44 @@ function notify(message) {
 }
 
 function selectedServer() {
-  return state.servers.find((server) => server.id === state.selectedServerId) || state.servers[0];
+  return state.servers.find((server) => server.id === state.selectedServerId) || state.servers[0] || null;
 }
 
 function updateConnectionView() {
+  const currentServer = selectedServer();
   if (connectionPending) {
     connectButton.textContent = pendingTarget ? "CONNECTING…" : "DISCONNECTING…";
   } else {
     connectButton.textContent = connected ? "DISCONNECT" : "CONNECT";
   }
-  connectButton.disabled = connectionPending;
+  connectButton.disabled = connectionPending || (!connected && !currentServer);
   connectButton.classList.toggle("connected", connected);
   connectButton.setAttribute("aria-pressed", String(connected));
   connectionOrbit.classList.toggle("connected", connected);
   connectionOrbit.classList.toggle("connecting", connectionPending);
   status.textContent = connectionPending
     ? (pendingTarget ? "Connecting…" : "Disconnecting…")
-    : (connected ? `Connected • ${selectedServer().location}` : "Not connected");
+    : (connected && currentServer ? `Connected • ${currentServer.location}` : "Not connected");
 }
 
 function renderServers() {
   serverList.textContent = "";
   serverCount.textContent = String(state.servers.length);
+  refreshSubscriptionsButton.disabled = state.subscriptions.length === 0 || connectionPending;
+  checkPingsButton.disabled = state.servers.length === 0 || connectionPending;
   const currentServer = selectedServer();
-  selectedServerLabel.textContent = `${currentServer.name} · ${currentServer.location}`;
+  addSubscriptionButton.disabled = connected || connectionPending;
+  selectedServerLabel.textContent = currentServer
+    ? `${currentServer.flag || "🌐"} ${currentServer.name} · ${currentServer.location}`
+    : "No server selected";
+
+  if (state.servers.length === 0) {
+    const empty = makeElement("div", "empty-servers");
+    empty.appendChild(makeElement("strong", "", "Add a VPN subscription"));
+    empty.appendChild(makeElement("span", "", "Your server locations will appear here after the subscription is loaded."));
+    serverList.appendChild(empty);
+    return;
+  }
 
   state.servers.forEach((server) => {
     const row = makeElement("div", "server-entry");
@@ -158,7 +176,7 @@ function renderServers() {
     });
 
     row.appendChild(button);
-    row.appendChild(edit);
+    if (!server.source) row.appendChild(edit);
     serverList.appendChild(row);
   });
 }
@@ -170,6 +188,9 @@ function persistConfig() {
 function copyConfig(config) {
   return {
     servers: config.servers.map((server) => Object.assign({}, server)),
+    subscriptions: (config.subscriptions || []).map((subscription) => Object.assign({}, subscription, {
+      servers: (subscription.servers || []).map((server) => Object.assign({}, server))
+    })),
     selectedServerId: config.selectedServerId,
     settings: Object.assign({}, config.settings)
   };
@@ -200,7 +221,28 @@ function buildSettingsContent() {
   addSettingsCheckbox(general, "startWithWindows", "Start with Windows");
   addSettingsCheckbox(general, "autoConnect", "Auto connect");
   addSettingsCheckbox(general, "minimizeToTray", "Minimize to tray");
-  general.appendChild(makeElement("p", "settings-note", "System startup and tray actions are available in the desktop app."));
+  addSettingsCheckbox(general, "autoUpdateSubscriptions", "Update subscriptions automatically");
+  const intervalLabel = makeElement("label", "setting-select-row");
+  intervalLabel.appendChild(makeElement("span", "", "Update interval"));
+  const intervalSelect = makeElement("select", "setting-select");
+  intervalSelect.setAttribute("data-setting", "subscriptionUpdateInterval");
+  [
+    ["15m", "15 minutes"],
+    ["30m", "30 minutes"],
+    ["1h", "1 hour"],
+    ["6h", "6 hours"],
+    ["12h", "12 hours"],
+    ["24h", "24 hours"],
+    ["manual", "Manually"]
+  ].forEach(([value, label]) => {
+    const option = makeElement("option", "", label);
+    option.value = value;
+    option.selected = value === state.settings.subscriptionUpdateInterval;
+    intervalSelect.appendChild(option);
+  });
+  intervalLabel.appendChild(intervalSelect);
+  general.appendChild(intervalLabel);
+  general.appendChild(makeElement("p", "settings-note", "Automatic refresh is a saved preference; subscriptions currently refresh when requested."));
 
   const connection = addSettingsGroup(content, "CONNECTION");
   const modeLabel = makeElement("label", "setting-select-row");
@@ -220,6 +262,30 @@ function buildSettingsContent() {
   addSettingsCheckbox(behavior, "rememberSelectedServer", "Remember selected server");
   addSettingsCheckbox(behavior, "connectOnStart", "Connect on application start");
 
+  const subscriptions = addSettingsGroup(content, "SUBSCRIPTIONS");
+  if (state.subscriptions.length === 0) {
+    subscriptions.appendChild(makeElement("p", "subscription-empty", "No subscriptions added yet."));
+  } else {
+    state.subscriptions.forEach((subscription) => {
+      const card = makeElement("div", "subscription-card");
+      const summary = makeElement("div", "subscription-summary");
+      summary.appendChild(makeElement("strong", "", subscription.name));
+      summary.appendChild(makeElement("span", "subscription-url", SubscriptionManager.displayUrl(subscription.url)));
+      summary.appendChild(makeElement("span", "subscription-updated", `Updated: ${formatUpdatedAt(subscription.updatedAt)}`));
+      card.appendChild(summary);
+      const controls = makeElement("div", "subscription-controls");
+      const refresh = makeButton("Refresh", "secondary-button", () => refreshSubscription(subscription.id));
+      const remove = makeButton("Remove", "danger-button", () => confirmRemoveSubscription(subscription));
+      refresh.disabled = connected || connectionPending;
+      remove.disabled = connected || connectionPending;
+      controls.appendChild(refresh);
+      controls.appendChild(remove);
+      card.appendChild(controls);
+      subscriptions.appendChild(card);
+    });
+  }
+  subscriptions.appendChild(makeButton("Add subscription", "secondary-button", openAddSubscription));
+
   const about = addSettingsGroup(content, "ABOUT");
   const aboutCard = makeElement("div", "about-card");
   aboutCard.appendChild(makeElement("strong", "", "Choobs"));
@@ -228,8 +294,8 @@ function buildSettingsContent() {
   about.appendChild(aboutCard);
 
   const dataActions = makeElement("div", "data-actions");
-  dataActions.appendChild(makeButton("Import servers", "secondary-button", importServers));
-  dataActions.appendChild(makeButton("Export servers", "secondary-button", exportServers));
+  dataActions.appendChild(makeButton("Import configuration", "secondary-button", importServers));
+  dataActions.appendChild(makeButton("Export configuration", "secondary-button", exportServers));
   content.appendChild(dataActions);
   content.appendChild(makeElement("div", "modal-feedback", ""));
   return content;
@@ -262,6 +328,186 @@ function openSettings() {
   });
   const close = makeButton("Close", "secondary-button", closeModal);
   showModal("Settings", content, [close, save]);
+}
+
+function formatUpdatedAt(value) {
+  if (!value) return "Never";
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp)) return "Never";
+  const minutes = Math.max(0, Math.floor((Date.now() - timestamp) / 60000));
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.floor(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
+function openAddSubscription() {
+  if (connected || connectionPending) {
+    notify("Disconnect before changing subscriptions");
+    return;
+  }
+  const returnToSettings = !modalOverlay.hidden && modalTitle.textContent === "Settings";
+  const form = makeElement("form", "subscription-form");
+  form.id = "subscriptionForm";
+  const nameField = createField(form, "Subscription name", "subscription-name", { placeholder: "My VPN" });
+  const urlField = createField(form, "Subscription URL", "subscription-url", {
+    type: "text",
+    placeholder: "https://example.com/subscription",
+    wide: true
+  });
+  urlField.control.inputMode = "url";
+  const feedback = makeElement("div", "modal-feedback", "");
+  form.appendChild(feedback);
+  const cancel = makeButton("Cancel", "secondary-button", () => {
+    closeModal();
+    if (returnToSettings) openSettings();
+  });
+  const add = makeButton("Add subscription", "primary-button", () => {});
+  add.type = "submit";
+  add.setAttribute("form", form.id);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    nameField.error.textContent = "";
+    urlField.error.textContent = "";
+    feedback.textContent = "";
+    const name = nameField.control.value.trim();
+    const url = urlField.control.value.trim();
+    if (!name) {
+      nameField.error.textContent = "Enter a subscription name.";
+      return;
+    }
+    try {
+      SubscriptionManager.normalizeUrl(url);
+    } catch (error) {
+      urlField.error.textContent = error.message;
+      return;
+    }
+
+    add.disabled = true;
+    add.textContent = "Loading…";
+    const previousState = copyConfig(state);
+    try {
+      const result = await SubscriptionManager.add(state, name, url);
+      state = result.config;
+      await persistConfig();
+      closeModal();
+      renderServers();
+      updateConnectionView();
+      const addedSubscription = state.subscriptions[state.subscriptions.length - 1];
+      const skipped = result.skipped ? `; ${result.skipped} unsupported entries skipped` : "";
+      notify(`Subscription added — ${addedSubscription.servers.length} servers${skipped}`);
+      if (returnToSettings) openSettings();
+    } catch (error) {
+      state = previousState;
+      add.disabled = false;
+      add.textContent = "Add subscription";
+      feedback.textContent = error.message;
+      feedback.classList.add("error");
+    }
+  });
+  showModal("Add subscription", form, [cancel, add]);
+}
+
+async function refreshSubscription(subscriptionId) {
+  if (connected || connectionPending) {
+    notify("Disconnect before updating subscriptions");
+    return false;
+  }
+  const previousState = copyConfig(state);
+  try {
+    const result = await SubscriptionManager.refresh(state, subscriptionId);
+    state = result.config;
+    await persistConfig();
+    renderServers();
+    updateConnectionView();
+    const subscription = state.subscriptions.find((item) => item.id === subscriptionId);
+    notify(`Subscription updated — ${subscription.servers.length} servers`);
+    if (result.skipped) notify(`${result.skipped} unsupported entries were skipped`);
+    if (!modalOverlay.hidden && modalTitle.textContent === "Settings") openSettings();
+    return true;
+  } catch (error) {
+    state = previousState;
+    renderServers();
+    updateConnectionView();
+    notify(`Could not update subscription: ${error.message}`);
+    return false;
+  }
+}
+
+async function refreshAllSubscriptions() {
+  if (!state.subscriptions.length) {
+    notify("Add a subscription first");
+    return;
+  }
+  refreshSubscriptionsButton.disabled = true;
+  refreshSubscriptionsButton.textContent = "↻ Updating…";
+  let successes = 0;
+  for (let index = 0; index < state.subscriptions.length; index += 1) {
+    if (await refreshSubscription(state.subscriptions[index].id)) successes += 1;
+  }
+  refreshSubscriptionsButton.textContent = "↻ Refresh subscription";
+  refreshSubscriptionsButton.disabled = state.subscriptions.length === 0;
+  if (successes === state.subscriptions.length) notify("All subscriptions updated");
+  else if (successes) notify(`${successes} of ${state.subscriptions.length} subscriptions updated`);
+}
+
+function confirmRemoveSubscription(subscription) {
+  if (connected || connectionPending) {
+    notify("Disconnect before changing subscriptions");
+    return;
+  }
+  const content = makeElement("div", "delete-confirmation");
+  content.appendChild(makeElement("p", "", `Remove “${subscription.name}” and all its servers?`));
+  const cancel = makeButton("Cancel", "secondary-button", () => {
+    closeModal();
+    openSettings();
+  });
+  const remove = makeButton("Remove subscription", "danger-button", async () => {
+    const previousState = copyConfig(state);
+    state = SubscriptionManager.remove(state, subscription.id);
+    try {
+      await persistConfig();
+      closeModal();
+      renderServers();
+      updateConnectionView();
+      notify("Subscription removed");
+      openSettings();
+    } catch (error) {
+      state = previousState;
+      setModalFeedback(error.message, true);
+    }
+  });
+  showModal("Remove subscription?", content, [cancel, remove]);
+}
+
+async function checkServerPings() {
+  if (window.ChoobsStorage.isPreview) {
+    notify("Ping checks require the desktop app; no mock values are shown");
+    return;
+  }
+  checkPingsButton.disabled = true;
+  checkPingsButton.textContent = "◉ Checking…";
+  let failed = 0;
+  for (let index = 0; index < state.servers.length; index += 1) {
+    const server = state.servers[index];
+    try {
+      const result = await window.ChoobsStorage.pingServer(server);
+      server.ping = result && Number.isFinite(result.ping) ? result.ping : null;
+      if (server.ping === null) failed += 1;
+    } catch (error) {
+      server.ping = null;
+      failed += 1;
+    }
+    renderServers();
+    checkPingsButton.disabled = true;
+    checkPingsButton.textContent = "◉ Checking…";
+  }
+  checkPingsButton.textContent = "◉ Check ping";
+  checkPingsButton.disabled = state.servers.length === 0;
+  persistConfig().catch((error) => notify(`Could not save ping results: ${error.message}`));
+  notify(failed ? `Ping check complete — ${failed} unavailable` : "Ping check complete");
 }
 
 function createField(form, labelText, key, options) {
@@ -479,64 +725,25 @@ function showDeleteConfirmation(server, form, editorActions) {
   modalActions.appendChild(remove);
 }
 
-function normalizeImportedServer(server, index) {
-  if (!server || typeof server !== "object" || Array.isArray(server)) {
-    throw new Error(`Server ${index + 1} is not a valid object.`);
-  }
-
-  const normalized = {
-    id: newServerId(),
-    name: typeof server.name === "string" ? server.name.trim() : "",
-    location: typeof server.location === "string" ? server.location.trim() : "",
-    flag: typeof server.flag === "string" ? server.flag.trim() : "",
-    address: typeof server.address === "string" ? server.address.trim() : "",
-    port: typeof server.port === "undefined" ? 443 : Number(server.port),
-    protocol: server.protocol || "HTTPS",
-    ping: server.ping === "" || server.ping === null || typeof server.ping === "undefined"
-      ? null
-      : Number(server.ping),
-    description: typeof server.description === "string" ? server.description.trim() : ""
-  };
-
-  if (!normalized.name || !normalized.location) throw new Error(`Server ${index + 1} needs a name and location.`);
-  if (!Number.isInteger(normalized.port) || normalized.port < 1 || normalized.port > 65535) {
-    throw new Error(`Server ${index + 1} has an invalid port.`);
-  }
-  if (protocols.indexOf(normalized.protocol) === -1) throw new Error(`Server ${index + 1} has an unsupported protocol.`);
-  if (normalized.ping !== null && (!Number.isFinite(normalized.ping) || normalized.ping < 0)) {
-    throw new Error(`Server ${index + 1} has an invalid ping.`);
-  }
-  if (typeof server.address !== "undefined" && typeof server.address !== "string") {
-    throw new Error(`Server ${index + 1} has an invalid address.`);
-  }
-  if (typeof server.description !== "undefined" && typeof server.description !== "string") {
-    throw new Error(`Server ${index + 1} has an invalid description.`);
-  }
-  return normalized;
-}
-
 async function importServers() {
   try {
     const imported = await window.ChoobsStorage.importServers();
     if (!imported) return;
-
-    const entries = Array.isArray(imported) ? imported : imported.servers;
-    if (!Array.isArray(entries) || entries.length === 0) {
-      throw new Error("The JSON file must contain a non-empty servers array.");
-    }
-
-    const addedServers = entries.map(normalizeImportedServer);
-    state.servers = state.servers.concat(addedServers);
+    const previousState = copyConfig(state);
+    state = SubscriptionManager.importData(imported, state);
     try {
       await persistConfig();
     } catch (error) {
-      state.servers = state.servers.slice(0, state.servers.length - addedServers.length);
+      state = previousState;
       throw error;
     }
 
     renderServers();
-    setModalFeedback(`Imported ${addedServers.length} server${addedServers.length === 1 ? "" : "s"}.`, false);
-    notify(`Imported ${addedServers.length} server${addedServers.length === 1 ? "" : "s"}`);
+    updateConnectionView();
+    const addedCount = state.servers.length - previousState.servers.length;
+    if (!modalOverlay.hidden || modalTitle.textContent === "Settings") openSettings();
+    setModalFeedback(`Imported ${addedCount} server${addedCount === 1 ? "" : "s"} and subscriptions.`, false);
+    notify(`Imported ${addedCount} server${addedCount === 1 ? "" : "s"}`);
   } catch (error) {
     setModalFeedback(error.message, true);
     notify(`Import failed: ${error.message}`);
@@ -545,7 +752,12 @@ async function importServers() {
 
 async function exportServers() {
   try {
-    const exported = await window.ChoobsStorage.exportServers(state.servers);
+    const exported = await window.ChoobsStorage.exportServers({
+      subscriptions: state.subscriptions,
+      servers: state.servers,
+      selectedServerId: state.selectedServerId,
+      settings: state.settings
+    });
     if (exported) {
       setModalFeedback("Servers exported successfully.", false);
       notify("Servers exported");
@@ -557,7 +769,9 @@ async function exportServers() {
 }
 
 settingsButton.addEventListener("click", openSettings);
-addServerButton.addEventListener("click", () => showServerForm("Add server", null));
+addSubscriptionButton.addEventListener("click", openAddSubscription);
+refreshSubscriptionsButton.addEventListener("click", refreshAllSubscriptions);
+checkPingsButton.addEventListener("click", checkServerPings);
 modalClose.addEventListener("click", closeModal);
 
 modalOverlay.addEventListener("click", (event) => {
@@ -570,6 +784,10 @@ document.addEventListener("keydown", (event) => {
 
 connectButton.addEventListener("click", () => {
   if (connectionPending) return;
+  if (!connected && !selectedServer()) {
+    notify("Add a subscription before connecting");
+    return;
+  }
   pendingTarget = !connected;
   connectionPending = true;
   renderServers();
@@ -587,14 +805,17 @@ async function start() {
   try {
     const result = await window.ChoobsStorage.loadConfig();
     state = result.config;
+    if (!Array.isArray(state.subscriptions)) state.subscriptions = [];
+    state.settings = Object.assign(defaultSettings(), state.settings || {});
     renderServers();
     updateConnectionView();
     if (result.warning) notify(result.warning);
     else if (window.ChoobsStorage.isPreview) notify("Browser preview · demo connection only");
   } catch (error) {
     state = {
-      servers: servers.map((server) => Object.assign({}, server)),
-      selectedServerId: servers[0].id,
+      servers: [],
+      subscriptions: [],
+      selectedServerId: null,
       settings: defaultSettings()
     };
     renderServers();

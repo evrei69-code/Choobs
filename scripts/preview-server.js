@@ -14,7 +14,13 @@ const contentTypes = {
 };
 
 function sendNotFound(response) {
-  response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+  response.writeHead(404, {
+    "Content-Type": "text/plain; charset=utf-8",
+    "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+    Pragma: "no-cache",
+    Expires: "0",
+    "X-Choobs-Preview": "app"
+  });
   response.end("Not found");
 }
 
@@ -50,7 +56,10 @@ const server = http.createServer((request, response) => {
       "Content-Type": contentTypes[path.extname(filePath).toLowerCase()] || "application/octet-stream",
       "Content-Length": stats.size,
       "X-Content-Type-Options": "nosniff",
-      "Cache-Control": "no-cache"
+      "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+      Pragma: "no-cache",
+      Expires: "0",
+      "X-Choobs-Preview": "app"
     };
     response.writeHead(200, headers);
     if (request.method === "HEAD") {
@@ -68,7 +77,7 @@ const server = http.createServer((request, response) => {
 });
 
 server.listen(port, host, () => {
-  console.log(`Choobs preview listening on http://localhost:${port}`);
+  console.log(`Choobs preview serving ${root} on http://localhost:${port}`);
 });
 
 server.on("error", (error) => {
