@@ -193,6 +193,17 @@
     }
   }
 
+  function safeContentType(value) {
+    var contentType = String(value || "");
+    var mimeType = contentType.split(";")[0].trim().toLowerCase();
+    if (!/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(mimeType)) return "unknown";
+    var charset = /(?:^|;)\s*charset\s*=\s*["']?([^;"'\s]+)/i.exec(contentType);
+    if (!charset) return mimeType;
+    var normalizedCharset = charset[1].toLowerCase();
+    var supportedCharsets = ["utf8", "utf-8", "utf-16", "utf-16le", "utf-16be", "us-ascii", "ascii", "iso-8859-1", "latin1", "windows-1252"];
+    return `${mimeType}; charset=${supportedCharsets.indexOf(normalizedCharset) !== -1 ? normalizedCharset : "unsupported"}`;
+  }
+
   function fetchSubscription(url) {
     if (desktopApi && typeof desktopApi.fetchSubscription === "function") {
       return desktopApi.fetchSubscription(url);
@@ -208,7 +219,19 @@
       if (!response.ok) throw new Error(`Subscription server returned HTTP ${response.status}.`);
       return response.text().then(function (text) {
         if (text.length > 5 * 1024 * 1024) throw new Error("Subscription response is larger than 5 MB.");
-        return text;
+        return {
+          text: text,
+          diagnostics: {
+            httpStatus: response.status,
+            contentType: safeContentType(response.headers.get("content-type")),
+            responseBytes: typeof global.TextEncoder === "function"
+              ? new global.TextEncoder().encode(text).length
+              : text.length,
+            decodedBytes: typeof global.TextEncoder === "function"
+              ? new global.TextEncoder().encode(text).length
+              : text.length
+          }
+        };
       });
     }).catch(function (error) {
       if (error && error.message && error.message.indexOf("Subscription server returned HTTP ") === 0) throw error;

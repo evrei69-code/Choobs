@@ -71,13 +71,30 @@
   function decodeBase64(value) {
     var normalized = value.replace(/-/g, "+").replace(/_/g, "/").replace(/\s/g, "");
     if (!normalized || !/^[A-Za-z0-9+/]*={0,2}$/.test(normalized)) return null;
+    var firstPadding = normalized.indexOf("=");
+    if (firstPadding !== -1 && normalized.length % 4 !== 0) return null;
+    var unpaddedLength = firstPadding === -1 ? normalized.length : firstPadding;
+    if (unpaddedLength % 4 === 1) return null;
+    normalized = normalized.slice(0, unpaddedLength);
     while (normalized.length % 4) normalized += "=";
 
     try {
-      var binary = global.atob(normalized);
+      var binary = "";
+      var alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+      for (var index = 0; index < normalized.length; index += 4) {
+        var first = alphabet.indexOf(normalized.charAt(index));
+        var second = alphabet.indexOf(normalized.charAt(index + 1));
+        var third = normalized.charAt(index + 2) === "=" ? 0 : alphabet.indexOf(normalized.charAt(index + 2));
+        var fourth = normalized.charAt(index + 3) === "=" ? 0 : alphabet.indexOf(normalized.charAt(index + 3));
+        if (first < 0 || second < 0 || third < 0 || fourth < 0) return null;
+        binary += String.fromCharCode((first << 2) | (second >> 4));
+        if (normalized.charAt(index + 2) !== "=") binary += String.fromCharCode(((second & 15) << 4) | (third >> 2));
+        if (normalized.charAt(index + 3) !== "=") binary += String.fromCharCode(((third & 3) << 6) | fourth);
+      }
+
       var encoded = "";
-      for (var index = 0; index < binary.length; index += 1) {
-        encoded += `%${(`00${binary.charCodeAt(index).toString(16)}`).slice(-2)}`;
+      for (var byteIndex = 0; byteIndex < binary.length; byteIndex += 1) {
+        encoded += `%${(`00${binary.charCodeAt(byteIndex).toString(16)}`).slice(-2)}`;
       }
       try {
         return decodeURIComponent(encoded);
@@ -91,23 +108,51 @@
 
   function decodeSubscriptionContent(content) {
     var text = String(content || "").replace(/^\uFEFF/, "").trim();
-    if (!text) return [];
+    if (!text) return { lines: [], format: "empty" };
 
-    try {
-      var decodedUri = decodeURIComponent(text);
-      if (decodedUri.indexOf("://") !== -1) text = decodedUri;
-    } catch (error) {
-      // Keep the source text when it contains percent-encoded URL fragments.
+    if (text.indexOf("://") === -1) {
+      try {
+        var decodedUri = decodeURIComponent(text);
+        if (/^[a-z][a-z0-9+.-]*:\/\//im.test(decodedUri)) {
+          text = decodedUri;
+          return {
+            lines: splitSubscriptionLines(text),
+            format: "percent-encoded URI list"
+          };
+        }
+      } catch (error) {
+        // Keep the source text when it contains percent-encoded subscription content.
+      }
     }
 
-    if (text.indexOf("://") === -1 && !/^\s*\{/.test(text)) {
+    if (!/^[a-z][a-z0-9+.-]*:\/\//im.test(text) && !/^\s*\{/.test(text)) {
       var decodedBase64 = decodeBase64(text);
-      if (decodedBase64 && decodedBase64.indexOf("://") !== -1) text = decodedBase64;
+      if (decodedBase64 && /^[a-z][a-z0-9+.-]*:\/\//im.test(decodedBase64.trim())) {
+        text = decodedBase64;
+        return {
+          lines: splitSubscriptionLines(text),
+          format: "base64 URI list"
+        };
+      }
     }
 
-    return text.split(/\r?\n/).map(function (line) {
-      return line.trim();
+    return {
+      lines: splitSubscriptionLines(text),
+      format: /^[a-z][a-z0-9+.-]*:\/\//im.test(text) ? "URI list" : "unrecognized"
+    };
+  }
+
+  function splitSubscriptionLines(text) {
+    return text.split(/\r\n?|\n/).map(function (line) {
+      return line.replace(/^\uFEFF+/, "").trim();
     }).filter(Boolean);
+  }
+
+  function contentByteLength(value) {
+    if (typeof global.TextEncoder === "function") {
+      return new global.TextEncoder().encode(value).length;
+    }
+    return unescape(encodeURIComponent(value)).length;
   }
 
   function decodeRemark(value) {
@@ -150,7 +195,172 @@
     return protocol === "SOCKS5" ? 1080 : (protocol === "Shadowsocks" ? 8388 : 443);
   }
 
+  function parseUriAuthority(uri, scheme, protocol) {
+    var rest = uri.slice(scheme.length + 3);
+    var end = rest.search(/[/?#]/);
+    var authority = end === -1 ? rest : rest.slice(0, end);
+    var at = authority.lastIndexOf("@");
+    var hostPort = at === -1 ? authority : authority.slice(at + 1);
+    if (!hostPort) return null;
+
+    var hostname;
+    var portText = "";
+    if (hostPort.charAt(0) === "[") {
+      var closingBracket = hostPort.indexOf("]");
+      if (closingBracket === -1) return null;
+      hostname = hostPort.slice(1, closingBracket);
+      var suffix = hostPort.slice(closingBracket + 1);
+      if (suffix && suffix.charAt(0) !== ":") return null;
+      portText = suffix ? suffix.slice(1) : "";
+      try {
+        new URL(`http://[${hostname}]/`);
+      } catch (error) {
+        return null;
+      }
+    } else {
+      var colon = hostPort.lastIndexOf(":");
+      if (colon !== -1) {
+        if (hostPort.indexOf(":") !== colon) return null;
+        hostname = hostPort.slice(0, colon);
+        portText = hostPort.slice(colon + 1);
+      } else {
+        hostname = hostPort;
+      }
+    }
+
+    try {
+      hostname = decodeURIComponent(hostname);
+    } catch (error) {
+      return null;
+    }
+    if (!hostname || /[\s/@?#]/.test(hostname)) return null;
+    if (portText && !/^\d+$/.test(portText)) return null;
+    if (hostPort.endsWith(":") || (portText && !portText.trim())) return null;
+    var port = portText ? Number(portText) : defaultPort(protocol);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+    return { hostname: hostname, port: port };
+  }
+
+  function parsedUriEndpoint(uri, scheme, protocol) {
+    try {
+      var parsed = new URL(uri);
+      var address = parsed.hostname;
+      var port = parsed.port ? Number(parsed.port) : defaultPort(protocol);
+      if (address && Number.isInteger(port) && port >= 1 && port <= 65535) {
+        return { hostname: address, port: port };
+      }
+    } catch (error) {
+      // Some older URL implementations reject otherwise usable custom-scheme authorities.
+    }
+    return parseUriAuthority(uri, scheme, protocol);
+  }
+
+  function safeQueryParameterNames(uri) {
+    var queryStart = uri.indexOf("?");
+    if (queryStart === -1) return [];
+    var queryEnd = uri.indexOf("#", queryStart);
+    var query = uri.slice(queryStart + 1, queryEnd === -1 ? uri.length : queryEnd);
+    var names = [];
+    query.split("&").forEach(function (part) {
+      if (!part) return;
+      var rawName = part.split("=")[0].replace(/\+/g, " ");
+      var name;
+      try {
+        name = decodeURIComponent(rawName);
+      } catch (error) {
+        return;
+      }
+      if (/^[A-Za-z0-9_.-]{1,40}$/.test(name) && names.indexOf(name) === -1) names.push(name);
+    });
+    return names;
+  }
+
+  function diagnoseUriLine(line, server) {
+    var schemeMatch = /^([a-z][a-z0-9+.-]*):\/\//i.exec(line);
+    var scheme = schemeMatch ? schemeMatch[1].toLowerCase() : "";
+    var knownScheme = Object.prototype.hasOwnProperty.call(protocolByScheme, scheme);
+    var validUri = false;
+    var diagnosticEndpoint = null;
+    if (scheme) {
+      if (scheme === "vmess") {
+        var vmessMatch = /^vmess:\/\/([^#]+)(?:#[^\r\n]*)?$/i.exec(line);
+        if (vmessMatch) {
+          var vmessText = decodeBase64(vmessMatch[1]);
+          if (vmessText) {
+            try {
+              var vmessData = JSON.parse(vmessText);
+              diagnosticEndpoint = {
+                hostname: typeof vmessData.add === "string" ? vmessData.add : ""
+              };
+              validUri = Boolean(diagnosticEndpoint.hostname)
+                && Number.isInteger(Number(vmessData.port))
+                && Number(vmessData.port) >= 1
+                && Number(vmessData.port) <= 65535;
+            } catch (error) {
+              validUri = false;
+            }
+          }
+        }
+      } else if (knownScheme) {
+        diagnosticEndpoint = parsedUriEndpoint(line, scheme, protocolByScheme[scheme]);
+        validUri = diagnosticEndpoint !== null;
+      } else {
+        try {
+          new URL(line);
+          validUri = true;
+        } catch (error) {
+          validUri = false;
+        }
+        diagnosticEndpoint = parseUriAuthority(line, scheme, "");
+      }
+    }
+
+    var reason = "parsed";
+    if (!scheme) {
+      reason = /:\/\//.test(line) ? "invalid scheme syntax" : "missing URI scheme";
+    } else if (!knownScheme) {
+      reason = "unsupported scheme";
+    } else if (!server) {
+      if (scheme === "vmess") {
+        var payload = line.slice("vmess://".length).split("#")[0];
+        var decoded = decodeBase64(payload);
+        if (!decoded) {
+          reason = "invalid VMess Base64 payload";
+        } else {
+          try {
+            var vmess = JSON.parse(decoded);
+            var vmessPort = Number(vmess.port);
+            reason = typeof vmess.add !== "string" || !vmess.add.trim()
+              ? "missing VMess address"
+              : (!Number.isInteger(vmessPort) || vmessPort < 1 || vmessPort > 65535
+                ? "invalid VMess port" : "VMess record rejected");
+          } catch (error) {
+            reason = "invalid VMess JSON";
+          }
+        }
+      } else if (!parsedUriEndpoint(line, scheme, protocolByScheme[scheme])) {
+        reason = "invalid or unsupported URI authority";
+      } else {
+        reason = "URI parser rejected record";
+      }
+    }
+
+    var hasInvisible = /[\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/.test(line);
+    return {
+      scheme: scheme || "unrecognized",
+      length: line.length,
+      validUri: validUri,
+      queryParameterNames: safeQueryParameterNames(line),
+      startsWithExpectedScheme: schemeMatch !== null && knownScheme,
+      hostnameLength: server ? server.address.length
+        : (diagnosticEndpoint && diagnosticEndpoint.hostname ? diagnosticEndpoint.hostname.length : null),
+      invisibleCharactersPresent: hasInvisible,
+      reason: hasInvisible && !server ? `${reason}; invisible character present` : reason
+    };
+  }
+
   function serverFromUri(uri, subscriptionId, index) {
+    if (/[\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/.test(uri)) return null;
     var vmessMatch = /^vmess:\/\/(.+)$/i.exec(uri);
     if (vmessMatch) {
       var decodedVmess = decodeBase64(vmessMatch[1].split("#")[0]);
@@ -197,11 +407,12 @@
     }
 
     try {
-      var parsed = new URL(normalizedUri);
-      var address = parsed.hostname;
-      var port = parsed.port ? Number(parsed.port) : defaultPort(protocol);
-      if (!address || !Number.isInteger(port) || port < 1 || port > 65535) return null;
-      var remark = parsed.hash ? decodeRemark(parsed.hash.slice(1)) : "";
+      var endpoint = parsedUriEndpoint(normalizedUri, scheme, protocol);
+      if (!endpoint) return null;
+      var address = endpoint.hostname;
+      var port = endpoint.port;
+      var hashIndex = normalizedUri.indexOf("#");
+      var remark = hashIndex === -1 ? "" : decodeRemark(normalizedUri.slice(hashIndex + 1));
       var place = placeFromRemark(remark);
       return {
         id: makeId("server"),
@@ -221,17 +432,78 @@
   }
 
   function parseSubscription(content, subscriptionId) {
-    var lines = decodeSubscriptionContent(content);
+    var response = content && typeof content === "object" && typeof content.text === "string"
+      ? content
+      : { text: String(content || ""), diagnostics: {} };
+    var decoded = decodeSubscriptionContent(response.text);
+    var lines = decoded.lines;
     var servers = [];
     var skipped = 0;
+    var protocolCounts = {
+      VLESS: 0,
+      VMess: 0,
+      Trojan: 0,
+      Shadowsocks: 0,
+      SOCKS5: 0,
+      HTTPS: 0,
+      "Other/unsupported": 0
+    };
+    var uriLikeLines = 0;
+    var uriDiagnostics = [];
 
     lines.forEach(function (line) {
+      var schemeMatch = /^([a-z][a-z0-9+.-]*):\/\//i.exec(line);
+      if (schemeMatch) uriLikeLines += 1;
       var server = serverFromUri(line, subscriptionId, servers.length);
-      if (server) servers.push(server);
-      else skipped += 1;
+      uriDiagnostics.push(diagnoseUriLine(line, server));
+      if (server) {
+        servers.push(server);
+        if (Object.prototype.hasOwnProperty.call(protocolCounts, server.protocol)) {
+          protocolCounts[server.protocol] += 1;
+        } else {
+          protocolCounts["Other/unsupported"] += 1;
+        }
+      } else {
+        skipped += 1;
+        if (schemeMatch && !Object.prototype.hasOwnProperty.call(protocolByScheme, schemeMatch[1].toLowerCase())) {
+          protocolCounts["Other/unsupported"] += 1;
+        }
+      }
     });
 
-    return { servers: servers, skipped: skipped };
+    var fetchDiagnostics = response.diagnostics || {};
+    return {
+      servers: servers,
+      skipped: skipped,
+      diagnostics: {
+        httpStatus: Number.isInteger(fetchDiagnostics.httpStatus) ? fetchDiagnostics.httpStatus : null,
+        contentType: typeof fetchDiagnostics.contentType === "string" ? fetchDiagnostics.contentType : "unknown",
+        responseBytes: Number.isInteger(fetchDiagnostics.responseBytes)
+          ? fetchDiagnostics.responseBytes
+          : contentByteLength(response.text),
+        format: decoded.format,
+        lineCount: lines.length,
+        uriLikeLines: uriLikeLines,
+        protocols: protocolCounts,
+        uriLines: uriDiagnostics
+      }
+    };
+  }
+
+  function noSupportedServersError(diagnostics) {
+    var protocols = diagnostics.protocols;
+    var status = diagnostics.httpStatus === null ? "unknown" : diagnostics.httpStatus;
+    if (global.console && typeof global.console.warn === "function") {
+      global.console.warn("Choobs safe subscription URI diagnostics:", diagnostics.uriLines);
+    }
+    return new Error(
+      `No supported VPN servers were found in this subscription. `
+      + `Fetch: HTTP ${status}, ${diagnostics.contentType}, ${diagnostics.responseBytes} bytes; `
+      + `decoded: ${diagnostics.format}, ${diagnostics.lineCount} lines, ${diagnostics.uriLikeLines} URI-like; `
+      + `VLESS ${protocols.VLESS}, VMess ${protocols.VMess}, Trojan ${protocols.Trojan}, `
+      + `Shadowsocks ${protocols.Shadowsocks}, SOCKS5 ${protocols.SOCKS5}, HTTPS ${protocols.HTTPS}, `
+      + `other/unsupported ${protocols["Other/unsupported"]}.`
+    );
   }
 
   function normalizeSubscriptionUrl(value) {
@@ -265,34 +537,34 @@
 
   async function fetchAndParse(name, url, subscriptionId) {
     var normalizedUrl = normalizeSubscriptionUrl(url);
-    var content = await global.ChoobsStorage.fetchSubscription(normalizedUrl);
-    var parsed = parseSubscription(content, subscriptionId);
+    var normalizedName = String(name || "").trim() || "My subscription";
+    var response = await global.ChoobsStorage.fetchSubscription(normalizedUrl);
+    var parsed = parseSubscription(response, subscriptionId);
     if (!parsed.servers.length) {
-      throw new Error("No supported VPN servers were found in this subscription.");
+      throw noSupportedServersError(parsed.diagnostics);
     }
 
     return {
       subscription: {
         id: subscriptionId,
-        name: name,
+        name: normalizedName,
         url: normalizedUrl,
         updatedAt: new Date().toISOString(),
         servers: parsed.servers
       },
-      skipped: parsed.skipped
+      skipped: parsed.skipped,
+      diagnostics: parsed.diagnostics
     };
   }
 
   async function add(config, name, url) {
-    var normalizedName = String(name || "").trim();
-    if (!normalizedName) throw new Error("Enter a subscription name.");
     var id = makeId("subscription");
-    var fetched = await fetchAndParse(normalizedName, url, id);
+    var fetched = await fetchAndParse(name, url, id);
     var updated = cloneConfig(config);
     updated.subscriptions.push(fetched.subscription);
     updated.servers = updated.servers.concat(fetched.subscription.servers);
     if (!updated.selectedServerId) updated.selectedServerId = fetched.subscription.servers[0].id;
-    return { config: updated, skipped: fetched.skipped };
+    return { config: updated, skipped: fetched.skipped, diagnostics: fetched.diagnostics };
   }
 
   async function refresh(config, subscriptionId) {
@@ -321,7 +593,7 @@
     if (!updated.servers.some(function (server) { return server.id === updated.selectedServerId; })) {
       updated.selectedServerId = updated.servers.length ? updated.servers[0].id : null;
     }
-    return { config: updated, skipped: fetched.skipped };
+    return { config: updated, skipped: fetched.skipped, diagnostics: fetched.diagnostics };
   }
 
   function remove(config, subscriptionId) {
@@ -422,10 +694,13 @@
     displayUrl: function (url) {
       try {
         var parsed = new URL(url);
-        return `${parsed.hostname}${parsed.pathname === "/" ? "" : parsed.pathname}`;
+        return parsed.hostname;
       } catch (error) {
-        return url;
+        return "Subscription URL";
       }
+    },
+    diagnose: function (content) {
+      return parseSubscription(content, "diagnostic").diagnostics.uriLines;
     }
   };
 

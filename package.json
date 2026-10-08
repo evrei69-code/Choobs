@@ -5,12 +5,59 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "preview": "node scripts/preview-server.js"
+    "preview": "node scripts/preview-server.js",
+    "build:win:portable": "node scripts/build-portable.js",
+    "test:ipc": "node --test tests/core-ipc.test.js",
+    "test:subscriptions": "node --test tests/subscriptions.test.js"
   },
   "devDependencies": {
-    "electron": "22.3.27"
+    "electron": "22.3.27",
+    "electron-builder": "26.15.3"
   },
   "allowScripts": {
     "electron@22.3.27": true
+  },
+  "build": {
+    "appId": "com.choobs.desktop",
+    "productName": "Choobs",
+    "asar": true,
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "config-store.js",
+      "app/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "backend/choobs-core-manager.exe",
+        "to": "backend/choobs-core-manager.exe"
+      },
+      {
+        "from": "core/bin/sing-box.exe",
+        "to": "core/bin/sing-box.exe"
+      },
+      {
+        "from": "core/configs",
+        "to": "core/configs",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "dir",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    }
   }
 }

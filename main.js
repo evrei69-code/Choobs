@@ -1,13 +1,22 @@
 const { app, BrowserWindow, dialog, ipcMain } = require("electron");
+const { spawn } = require("child_process");
 const fs = require("fs");
 const http = require("http");
 const https = require("https");
 const net = require("net");
 const path = require("path");
+const readline = require("readline");
+const { TextDecoder } = require("util");
+const zlib = require("zlib");
 const { ConfigStore, normalizeServer, normalizeSubscription } = require("./config-store");
 
+const ownsSingleInstanceLock = app.requestSingleInstanceLock();
 let mainWindow;
 let configStore;
+let coreManagerProcess = null;
+let coreManagerPending = null;
+let coreManagerRequestId = 0;
+let coreManagerQueue = Promise.resolve();
 
 function validateHttpUrl(value) {
   let url;
@@ -20,6 +29,58 @@ function validateHttpUrl(value) {
     throw new Error("Subscription URL must be HTTP or HTTPS and must not include login credentials.");
   }
   return url;
+}
+
+function safeContentType(value) {
+  const contentType = String(value || "");
+  const mimeType = contentType.split(";")[0].trim().toLowerCase();
+  if (!/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(mimeType)) return "unknown";
+  const charset = /(?:^|;)\s*charset\s*=\s*["']?([^;"'\s]+)/i.exec(contentType);
+  if (!charset) return mimeType;
+  const supportedCharsets = new Set([
+    "utf8", "utf-8", "utf-16", "utf-16le", "utf-16be",
+    "us-ascii", "ascii", "iso-8859-1", "latin1", "windows-1252"
+  ]);
+  const normalizedCharset = charset[1].toLowerCase();
+  return `${mimeType}; charset=${supportedCharsets.has(normalizedCharset) ? normalizedCharset : "unsupported"}`;
+}
+
+function decodeSubscriptionBody(buffer, contentType) {
+  let encoding = "utf-8";
+  let offset = 0;
+  if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) {
+    encoding = "utf-16le";
+    offset = 2;
+  } else if (buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff) {
+    encoding = "utf-16be";
+    offset = 2;
+  } else if (buffer.length >= 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) {
+    offset = 3;
+  } else {
+    const charset = /(?:^|;)\s*charset\s*=\s*["']?([^;"'\s]+)/i.exec(String(contentType || ""));
+    if (charset) {
+      const requested = charset[1].toLowerCase();
+      const supportedCharsets = {
+        utf8: "utf-8",
+        "utf-8": "utf-8",
+        "utf-16": "utf-16le",
+        "utf-16le": "utf-16le",
+        "utf-16be": "utf-16be",
+        "us-ascii": "windows-1252",
+        ascii: "windows-1252",
+        "iso-8859-1": "windows-1252",
+        latin1: "windows-1252",
+        "windows-1252": "windows-1252"
+      };
+      encoding = supportedCharsets[requested];
+      if (!encoding) throw new Error("Subscription response uses an unsupported text encoding.");
+    }
+  }
+  try {
+    return new TextDecoder(encoding, { fatal: true }).decode(buffer.subarray(offset));
+  } catch (error) {
+    throw new Error("Subscription response text could not be decoded.");
+  }
 }
 
 function fetchSubscriptionText(value, redirects) {
@@ -59,23 +120,82 @@ function fetchSubscriptionText(value, redirects) {
         return;
       }
       if (status < 200 || status >= 300) {
+        const contentType = safeContentType(response.headers["content-type"]);
         response.resume();
-        reject(new Error(`Subscription server returned HTTP ${status}.`));
+        reject(new Error(`Subscription server returned HTTP ${status} (${contentType}).`));
         return;
       }
 
+      const contentType = response.headers["content-type"] || "";
+      const contentEncoding = String(response.headers["content-encoding"] || "identity").toLowerCase().trim();
+      const decompressors = {
+        gzip: () => zlib.createGunzip(),
+        "x-gzip": () => zlib.createGunzip(),
+        deflate: () => zlib.createInflate(),
+        br: () => zlib.createBrotliDecompress()
+      };
+      let decodedStream = response;
+      if (contentEncoding !== "" && contentEncoding !== "identity") {
+        if (!Object.prototype.hasOwnProperty.call(decompressors, contentEncoding)
+            || typeof zlib.createBrotliDecompress !== "function" && contentEncoding === "br") {
+          response.resume();
+          reject(new Error("Subscription server returned an unsupported content encoding."));
+          return;
+        }
+        decodedStream = decompressors[contentEncoding]();
+      }
+
       const chunks = [];
-      let size = 0;
+      let responseBytes = 0;
+      let decodedBytes = 0;
+      let settled = false;
+      const fail = (error) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      };
       response.on("data", (chunk) => {
-        size += chunk.length;
-        if (size > 5 * 1024 * 1024) {
-          response.destroy(new Error("Subscription response is larger than 5 MB."));
+        responseBytes += chunk.length;
+        if (responseBytes > 5 * 1024 * 1024) {
+          const error = new Error("Subscription response is larger than 5 MB.");
+          response.destroy();
+          if (decodedStream !== response) decodedStream.destroy();
+          fail(error);
+        }
+      });
+      decodedStream.on("data", (chunk) => {
+        decodedBytes += chunk.length;
+        if (decodedBytes > 5 * 1024 * 1024) {
+          const error = new Error("Subscription response is larger than 5 MB.");
+          response.destroy();
+          if (decodedStream !== response) decodedStream.destroy();
+          fail(error);
           return;
         }
         chunks.push(chunk);
       });
-      response.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-      response.on("error", reject);
+      response.on("error", fail);
+      if (decodedStream !== response) decodedStream.on("error", fail);
+      decodedStream.on("end", () => {
+        if (settled) return;
+        try {
+          const body = Buffer.concat(chunks);
+          const text = decodeSubscriptionBody(body, contentType);
+          settled = true;
+          resolve({
+            text: text,
+            diagnostics: {
+              httpStatus: status,
+              contentType: safeContentType(contentType),
+              responseBytes: responseBytes,
+              decodedBytes: decodedBytes
+            }
+          });
+        } catch (error) {
+          fail(error);
+        }
+      });
+      if (decodedStream !== response) response.pipe(decodedStream);
     });
     request.on("timeout", () => request.destroy(new Error("Subscription request timed out.")));
     request.on("error", reject);
@@ -108,6 +228,105 @@ function pingServer(server) {
   });
 }
 
+function getCoreManagerPath() {
+  const applicationDirectory = app.isPackaged ? process.resourcesPath : app.getAppPath();
+  const executableName = process.platform === "win32" ? "choobs-core-manager.exe" : "choobs-core-manager";
+  return path.join(applicationDirectory, "backend", executableName);
+}
+
+function ensureCoreManager() {
+  if (coreManagerProcess && !coreManagerProcess.killed) return coreManagerProcess;
+  const executablePath = getCoreManagerPath();
+  if (!fs.existsSync(executablePath)) {
+    throw new Error("Core Manager executable not found. Build backend/choobs-core-manager before starting the desktop app.");
+  }
+
+  const managerProcess = spawn(executablePath, [], {
+    cwd: path.dirname(path.dirname(executablePath)),
+    env: Object.assign({}, process.env, { CHOOBS_DATA_DIRECTORY: app.getPath("userData") }),
+    stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true
+  });
+  coreManagerProcess = managerProcess;
+  const output = readline.createInterface({ input: managerProcess.stdout });
+  output.on("line", (line) => {
+    let response;
+    try {
+      response = JSON.parse(line);
+    } catch (error) {
+      if (coreManagerPending) {
+        coreManagerPending.reject(new Error("Core Manager returned an invalid response."));
+        coreManagerPending = null;
+      }
+      return;
+    }
+    if (!coreManagerPending || response.id !== coreManagerPending.id) return;
+    coreManagerPending.resolve(response.status);
+    coreManagerPending = null;
+  });
+  managerProcess.on("error", (error) => {
+    if (coreManagerPending) {
+      coreManagerPending.reject(new Error(`Could not start Core Manager: ${error.message}`));
+      coreManagerPending = null;
+    }
+    if (coreManagerProcess === managerProcess) coreManagerProcess = null;
+  });
+  managerProcess.on("exit", (code) => {
+    output.close();
+    if (coreManagerPending) {
+      coreManagerPending.reject(new Error(`Core Manager exited unexpectedly (${code === null ? "unknown" : code}).`));
+      coreManagerPending = null;
+    }
+    if (coreManagerProcess === managerProcess) coreManagerProcess = null;
+  });
+  managerProcess.stderr.on("data", (chunk) => {
+    console.error(`Core Manager: ${chunk.toString().trim()}`);
+  });
+  return managerProcess;
+}
+
+function callCoreManager(command, server) {
+  const run = async () => {
+    const managerProcess = ensureCoreManager();
+    const id = `core-${++coreManagerRequestId}`;
+    const request = { id, command };
+    if (server) request.server = server;
+    return new Promise((resolve, reject) => {
+      coreManagerPending = { id, resolve, reject };
+      managerProcess.stdin.write(`${JSON.stringify(request)}\n`, (error) => {
+        if (error && coreManagerPending && coreManagerPending.id === id) {
+          coreManagerPending = null;
+          reject(new Error(`Could not send command to Core Manager: ${error.message}`));
+        }
+      });
+    });
+  };
+  const result = coreManagerQueue.then(run, run);
+  coreManagerQueue = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+function validateCoreServer(serverId) {
+  if (typeof serverId !== "string" || !serverId.trim()) {
+    throw new Error("Select a saved server before starting the core.");
+  }
+  const storedServer = configStore.load().config.servers.find((item) => item.id === serverId);
+  if (!storedServer) throw new Error("Selected server is no longer available. Refresh the server list.");
+  if (typeof storedServer.uri !== "string" || !storedServer.uri || storedServer.uri.length > 8192
+      || typeof storedServer.address !== "string" || !storedServer.address.trim()
+      || !Number.isInteger(storedServer.port) || storedServer.port < 1 || storedServer.port > 65535) {
+    throw new Error("Selected server does not have a supported connection configuration.");
+  }
+  return {
+    id: storedServer.id,
+    name: storedServer.name,
+    protocol: storedServer.protocol,
+    address: storedServer.address,
+    port: storedServer.port,
+    uri: storedServer.uri
+  };
+}
+
 function registerIpcHandlers() {
   ipcMain.handle("choobs:load-config", () => configStore.load());
   ipcMain.handle("choobs:save-config", (_event, config) => configStore.save(config));
@@ -133,6 +352,13 @@ function registerIpcHandlers() {
   });
   ipcMain.handle("choobs:fetch-subscription", (_event, url) => fetchSubscriptionText(url));
   ipcMain.handle("choobs:ping-server", (_event, server) => pingServer(server));
+  ipcMain.handle("core:start", (_event, serverId) => callCoreManager("start", validateCoreServer(serverId)));
+  ipcMain.handle("core:stop", () => callCoreManager("stop"));
+  ipcMain.handle("core:restart", (_event, serverId) => {
+    const selectedServer = typeof serverId === "undefined" ? undefined : validateCoreServer(serverId);
+    return callCoreManager("restart", selectedServer);
+  });
+  ipcMain.handle("core:status", () => callCoreManager("status"));
   ipcMain.handle("choobs:export-servers", async (_event, data) => {
     const payload = Array.isArray(data) ? { servers: data, subscriptions: [] } : data;
     if (!payload || typeof payload !== "object" || !Array.isArray(payload.servers)) {
@@ -187,14 +413,47 @@ function createWindow() {
   });
 }
 
-app.whenReady().then(() => {
-  configStore = new ConfigStore(path.join(app.getPath("userData"), "choobs-config.json"));
-  registerIpcHandlers();
-  createWindow();
-});
+if (ownsSingleInstanceLock) {
+  app.whenReady().then(() => {
+    configStore = new ConfigStore(path.join(app.getPath("userData"), "choobs-config.json"));
+    registerIpcHandlers();
+    createWindow();
+  });
+} else {
+  app.quit();
+}
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
+});
+
+let quitAfterCoreStop = false;
+app.on("before-quit", (event) => {
+  if (quitAfterCoreStop) return;
+  if (!coreManagerProcess) {
+    quitAfterCoreStop = true;
+    return;
+  }
+  event.preventDefault();
+  quitAfterCoreStop = true;
+  callCoreManager("stop").then(async (status) => {
+    if (!status || status.running || status.code === "PROXY_RESTORE_FAILED") {
+      throw new Error(status && status.error
+        ? status.error
+        : "The VPN core is still running, so Choobs cannot safely exit.");
+    }
+    if (coreManagerProcess && !coreManagerProcess.killed) coreManagerProcess.stdin.end();
+    app.quit();
+  }).catch(async (error) => {
+    quitAfterCoreStop = false;
+    await dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      title: "Choobs could not safely disconnect",
+      message: "Choobs will remain open so you can retry disconnecting.",
+      detail: error.message,
+      buttons: ["Keep Choobs open"]
+    });
+  });
 });
 
 app.on("activate", () => {

@@ -1,0 +1,8 @@
+backend/choobs-core-manager
+backend/choobs-core-manager.exe
+node_modules/
+core/bin/*
+!core/bin/.gitkeep
+core/configs/runtime.json
+core/logs/sing-box.log
+dist/

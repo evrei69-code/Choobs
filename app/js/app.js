@@ -16,7 +16,6 @@ const modalClose = document.getElementById("modalClose");
 const toast = document.getElementById("toast");
 
 const protocols = ["HTTPS", "SOCKS5", "VLESS", "VMess", "Trojan", "Shadowsocks", "Custom"];
-const connectionModes = ["System Proxy", "TUN", "Auto"];
 let state;
 let connected = false;
 let connectionPending = false;
@@ -24,6 +23,7 @@ let pendingTarget = false;
 let modalReturnFocus = null;
 let serverIdSequence = 0;
 let toastTimer = null;
+let coreStatusTimer = null;
 
 function makeElement(tagName, className, text) {
   const node = document.createElement(tagName);
@@ -88,6 +88,35 @@ function selectedServer() {
   return state.servers.find((server) => server.id === state.selectedServerId) || state.servers[0] || null;
 }
 
+function monitorCoreStatus() {
+  if (window.ChoobsStorage.isPreview || coreStatusTimer || !window.choobs) return;
+  coreStatusTimer = window.setInterval(async () => {
+    if (!connected) return;
+    try {
+      const currentStatus = await window.choobs.getCoreStatus();
+      if (!connected) return;
+      const proxyRecoveryNeeded = currentStatus && currentStatus.code === "PROXY_RESTORE_FAILED" && currentStatus.running;
+      if (!currentStatus || (!proxyRecoveryNeeded && currentStatus.state !== "running") || !currentStatus.running) {
+        connected = false;
+        window.clearInterval(coreStatusTimer);
+        coreStatusTimer = null;
+        renderServers();
+        updateConnectionView();
+        notify(currentStatus && currentStatus.error
+          ? `VPN connection lost: ${currentStatus.error}`
+          : "VPN core stopped unexpectedly");
+      }
+    } catch (error) {
+      connected = false;
+      window.clearInterval(coreStatusTimer);
+      coreStatusTimer = null;
+      renderServers();
+      updateConnectionView();
+      notify(`Could not verify VPN core status: ${error.message}`);
+    }
+  }, 2500);
+}
+
 function updateConnectionView() {
   const currentServer = selectedServer();
   if (connectionPending) {
@@ -102,7 +131,7 @@ function updateConnectionView() {
   connectionOrbit.classList.toggle("connecting", connectionPending);
   status.textContent = connectionPending
     ? (pendingTarget ? "Connecting…" : "Disconnecting…")
-    : (connected && currentServer ? `Connected • ${currentServer.location}` : "Not connected");
+    : (connected && currentServer ? `System proxy active • ${currentServer.location}` : "Not connected");
 }
 
 function renderServers() {
@@ -245,18 +274,11 @@ function buildSettingsContent() {
   general.appendChild(makeElement("p", "settings-note", "Automatic refresh is a saved preference; subscriptions currently refresh when requested."));
 
   const connection = addSettingsGroup(content, "CONNECTION");
-  const modeLabel = makeElement("label", "setting-select-row");
-  modeLabel.appendChild(makeElement("span", "", "Connection mode"));
-  const modeSelect = makeElement("select", "setting-select");
-  modeSelect.setAttribute("data-setting", "connectionMode");
-  connectionModes.forEach((mode) => {
-    const option = makeElement("option", "", mode);
-    option.value = mode;
-    option.selected = mode === state.settings.connectionMode;
-    modeSelect.appendChild(option);
-  });
-  modeLabel.appendChild(modeSelect);
-  connection.appendChild(modeLabel);
+  connection.appendChild(makeElement(
+    "p",
+    "settings-note",
+    "Connect temporarily routes Windows applications that honor the per-user system proxy through Choobs. Some applications bypass this setting, and DNS requests may still go directly to your network. This is not a full-device tunnel."
+  ));
 
   const behavior = addSettingsGroup(content, "BEHAVIOR");
   addSettingsCheckbox(behavior, "rememberSelectedServer", "Remember selected server");
@@ -351,7 +373,7 @@ function openAddSubscription() {
   const returnToSettings = !modalOverlay.hidden && modalTitle.textContent === "Settings";
   const form = makeElement("form", "subscription-form");
   form.id = "subscriptionForm";
-  const nameField = createField(form, "Subscription name", "subscription-name", { placeholder: "My VPN" });
+  const nameField = createField(form, "Subscription name (optional)", "subscription-name", { placeholder: "My subscription" });
   const urlField = createField(form, "Subscription URL", "subscription-url", {
     type: "text",
     placeholder: "https://example.com/subscription",
@@ -374,10 +396,6 @@ function openAddSubscription() {
     feedback.textContent = "";
     const name = nameField.control.value.trim();
     const url = urlField.control.value.trim();
-    if (!name) {
-      nameField.error.textContent = "Enter a subscription name.";
-      return;
-    }
     try {
       SubscriptionManager.normalizeUrl(url);
     } catch (error) {
@@ -782,7 +800,7 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !modalOverlay.hidden) closeModal();
 });
 
-connectButton.addEventListener("click", () => {
+connectButton.addEventListener("click", async () => {
   if (connectionPending) return;
   if (!connected && !selectedServer()) {
     notify("Add a subscription before connecting");
@@ -792,13 +810,54 @@ connectButton.addEventListener("click", () => {
   connectionPending = true;
   renderServers();
   updateConnectionView();
-  window.setTimeout(() => {
-    connected = pendingTarget;
+  try {
+    if (window.ChoobsStorage.isPreview) {
+      await new Promise((resolve) => window.setTimeout(resolve, 650));
+      connected = pendingTarget;
+    } else if (pendingTarget) {
+      const result = await window.choobs.startCore(selectedServer().id);
+      if (!result || result.state !== "running" || !result.running) {
+        if (result && result.running) {
+          connected = true;
+          monitorCoreStatus();
+        }
+        const message = result && result.error ? result.error : "VPN core did not start.";
+        if (/core manager executable not found/i.test(message)) {
+          throw new Error("Core Manager не найден — соберите backend/choobs-core-manager.");
+        }
+        if (/VPN core not found|sing-box executable not found|no such file/i.test(message)) {
+          throw new Error("VPN core не найден — установите sing-box core.");
+        }
+        throw new Error(message);
+      }
+      connected = true;
+      notify(`System proxy active • VPN exit IP ${result.externalIP}`);
+      monitorCoreStatus();
+    } else {
+      const result = await window.choobs.stopCore();
+      if (!result || result.state !== "stopped" || result.running) {
+        if (result && result.running) {
+          connected = true;
+          monitorCoreStatus();
+        }
+        throw new Error(result && result.error ? result.error : "VPN core did not stop.");
+      }
+      connected = false;
+      if (coreStatusTimer) {
+        window.clearInterval(coreStatusTimer);
+        coreStatusTimer = null;
+      }
+      notify("Disconnected; previous Windows proxy settings restored");
+    }
+  } catch (error) {
+    notify(`${pendingTarget ? "Connection failed" : "Disconnect failed"}: ${error.message}`);
+  } finally {
     connectionPending = false;
     renderServers();
     updateConnectionView();
-    notify(connected ? `Demo connected to ${selectedServer().location}` : "Demo disconnected");
-  }, 650);
+  }
+  if (connected && window.ChoobsStorage.isPreview) notify(`Demo connected to ${selectedServer().location}`);
+  else if (!connected && window.ChoobsStorage.isPreview) notify("Demo disconnected");
 });
 
 async function start() {
@@ -811,6 +870,17 @@ async function start() {
     updateConnectionView();
     if (result.warning) notify(result.warning);
     else if (window.ChoobsStorage.isPreview) notify("Browser preview · demo connection only");
+    if (!window.ChoobsStorage.isPreview && window.choobs && typeof window.choobs.getCoreStatus === "function") {
+      try {
+        const coreStatus = await window.choobs.getCoreStatus();
+        connected = Boolean(coreStatus && coreStatus.running && coreStatus.state === "running");
+        renderServers();
+        updateConnectionView();
+        if (connected) monitorCoreStatus();
+      } catch (error) {
+        notify(`Could not read VPN core status: ${error.message}`);
+      }
+    }
   } catch (error) {
     state = {
       servers: [],

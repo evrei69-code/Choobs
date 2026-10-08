@@ -1,26 +1,9 @@
 # Choobs
 
-Lightweight VPN client focused on Windows 7.
+1. Download `Choobs.exe`.
+2. Run `Choobs.exe`.
+3. Paste your VPN subscription URL.
+4. Select a server.
+5. Click **Connect**.
 
-## Stack
-
-- Electron 22
-- HTML / CSS / JavaScript
-- Go
-- sing-box
-
-## Current version
-
-0.1.0 — initial UI prototype.
-
-The Connect button currently simulates a connection. No real VPN connection is active yet.
-
-## Roadmap
-
-1. Settings
-2. Server import
-3. Go backend
-4. sing-box integration
-5. Real connection
-6. Windows 7 testing
-7. Installer
+Choobs routes Windows applications that honor the per-user system proxy through the selected server. Some applications may bypass that setting, and DNS requests may still go directly to your network; this is not a full-device tunnel.
