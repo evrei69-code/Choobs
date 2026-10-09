@@ -1,4 +1,4 @@
-name: Build Choobs for Windows
+name: Build Choobs for Windows 7
 
 on:
 workflow_dispatch:
@@ -8,29 +8,30 @@ contents: read
 
 jobs:
 build:
-runs-on: windows-2022
-
-steps:
-  - name: Checkout repository
+name: Build portable Choobs.exe
+runs-on: windows-2022 steps:
+  - name: Download repository
     uses: actions/checkout@v4
 
-  - name: Setup Node.js
+  - name: Install Node.js
     uses: actions/setup-node@v4
     with:
       node-version: 20
       cache: npm
 
-  - name: Setup Go
+  - name: Install Go
     uses: actions/setup-go@v5
     with:
       go-version: '1.20.14'
 
-  - name: Install dependencies
+  - name: Install npm dependencies
     run: npm ci
 
-  - name: Download and verify sing-box for Windows 7
+  - name: Download sing-box for Windows 7
     shell: pwsh
     run: |
+      $ErrorActionPreference = "Stop"
+
       $url = "https://github.com/SagerNet/sing-box/releases/download/v1.10.7/sing-box-1.10.7-windows-amd64-legacy.zip"
       $zip = Join-Path $env:RUNNER_TEMP "sing-box.zip"
       $extract = Join-Path $env:RUNNER_TEMP "sing-box-extracted"
@@ -40,31 +41,69 @@ steps:
 
       $binary = Get-ChildItem -Path $extract -Filter "sing-box.exe" -Recurse | Select-Object -First 1
 
-      if (-not $binary) {
-        throw "sing-box.exe was not found in the downloaded archive."
+      if ($null -eq $binary) {
+        throw "sing-box.exe was not found in the archive."
       }
 
       New-Item -ItemType Directory -Path "core/bin" -Force | Out-Null
-      Copy-Item $binary.FullName "core/bin/sing-box.exe" -Force
+      Copy-Item -Path $binary.FullName -Destination "core/bin/sing-box.exe" -Force
 
-      $hash = (Get-FileHash "core/bin/sing-box.exe" -Algorithm SHA256).Hash.ToLower()
+      $expectedHash = "99fb67d576d13fcdb9bf938f393a6d2016da306b9eff853dbdbc75e2092443cc"
+      $actualHash = (Get-FileHash "core/bin/sing-box.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
 
-      if ($hash -ne "99fb67d576d13fcdb9bf938f393a6d2016da306b9eff853dbdbc75e2092443cc") {
-        throw "sing-box SHA-256 verification failed: $hash"
+      if ($actualHash -ne $expectedHash) {
+        throw "SHA-256 mismatch. Expected $expectedHash but received $actualHash"
       }
 
-      Write-Host "sing-box downloaded and verified successfully."
+      Write-Host "sing-box downloaded and checksum verified."
 
-  - name: Build Choobs portable executable
+  - name: Verify required project files
+    shell: pwsh
+    run: |
+      $ErrorActionPreference = "Stop"
+
+      $requiredFiles = @(
+        "package.json",
+        "scripts/build-portable.js",
+        "core/bin/sing-box.exe"
+      )
+
+      foreach ($file in $requiredFiles) {
+        if (-not (Test-Path $file)) {
+          throw "Required file is missing: $file"
+        }
+      }
+
+      Write-Host "Required files are present."
+
+  - name: Build Choobs.exe
     run: npm run build:win:portable
     env:
       GOTOOLCHAIN: go1.20.14
 
-  - name: Upload Choobs executable
+  - name: Verify output
+    shell: pwsh
+    run: |
+      $ErrorActionPreference = "Stop"
+      $output = "dist/Choobs.exe"
+
+      if (-not (Test-Path $output)) {
+        throw "Build failed: dist/Choobs.exe was not created."
+      }
+
+      $file = Get-Item $output
+
+      if ($file.Length -le 0) {
+        throw "Build failed: Choobs.exe is empty."
+      }
+
+      Write-Host "Build completed: $output"
+      Write-Host "Size: $($file.Length) bytes"
+
+  - name: Upload portable executable
     uses: actions/upload-artifact@v4
     with:
       name: Choobs-Windows-Portable
       path: dist/Choobs.exe
       if-no-files-found: error
-      retention-days: 14 
- 
+      retention-days: 14
