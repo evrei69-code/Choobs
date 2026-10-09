@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, Menu, Tray, nativeImage } = require("electron");
 const { spawn } = require("child_process");
 const fs = require("fs");
 const http = require("http");
@@ -10,6 +10,7 @@ const { TextDecoder } = require("util");
 const zlib = require("zlib");
 const { ConfigStore, normalizeServer, normalizeSubscription } = require("./config-store");
 
+const iconDirectory = path.join(__dirname, "assets", "icons");
 const ownsSingleInstanceLock = app.requestSingleInstanceLock();
 let mainWindow;
 let configStore;
@@ -17,6 +18,10 @@ let coreManagerProcess = null;
 let coreManagerPending = null;
 let coreManagerRequestId = 0;
 let coreManagerQueue = Promise.resolve();
+let tray = null;
+let trayStatus = { running: false, state: "stopped" };
+let trayActionPending = false;
+let exitRequested = false;
 
 function validateHttpUrl(value) {
   let url;
@@ -262,6 +267,10 @@ function ensureCoreManager() {
     }
     if (!coreManagerPending || response.id !== coreManagerPending.id) return;
     coreManagerPending.resolve(response.status);
+    updateTrayStatus(response.status);
+    if (coreManagerPending.notifyRenderer && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("core:status-changed", response.status);
+    }
     coreManagerPending = null;
   });
   managerProcess.on("error", (error) => {
@@ -285,14 +294,14 @@ function ensureCoreManager() {
   return managerProcess;
 }
 
-function callCoreManager(command, server) {
+function callCoreManager(command, server, notifyRenderer) {
   const run = async () => {
     const managerProcess = ensureCoreManager();
     const id = `core-${++coreManagerRequestId}`;
     const request = { id, command };
     if (server) request.server = server;
     return new Promise((resolve, reject) => {
-      coreManagerPending = { id, resolve, reject };
+      coreManagerPending = { id, command, notifyRenderer: Boolean(notifyRenderer), resolve, reject };
       managerProcess.stdin.write(`${JSON.stringify(request)}\n`, (error) => {
         if (error && coreManagerPending && coreManagerPending.id === id) {
           coreManagerPending = null;
@@ -329,7 +338,11 @@ function validateCoreServer(serverId) {
 
 function registerIpcHandlers() {
   ipcMain.handle("choobs:load-config", () => configStore.load());
-  ipcMain.handle("choobs:save-config", (_event, config) => configStore.save(config));
+  ipcMain.handle("choobs:save-config", (_event, config) => {
+    const saved = configStore.save(config);
+    updateTrayStatus(trayStatus);
+    return saved;
+  });
   ipcMain.handle("choobs:import-servers", async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
       title: "Import servers",
@@ -352,6 +365,16 @@ function registerIpcHandlers() {
   });
   ipcMain.handle("choobs:fetch-subscription", (_event, url) => fetchSubscriptionText(url));
   ipcMain.handle("choobs:ping-server", (_event, server) => pingServer(server));
+  ipcMain.handle("choobs:set-start-with-windows", (_event, enabled) => {
+    if (typeof enabled !== "boolean") throw new Error("Start with Windows must be enabled or disabled.");
+    if (process.platform !== "win32") throw new Error("Start with Windows is available only on Windows.");
+    app.setLoginItemSettings({
+      openAtLogin: enabled,
+      path: process.execPath,
+      args: ["--hidden"]
+    });
+    return app.getLoginItemSettings().openAtLogin === enabled;
+  });
   ipcMain.handle("core:start", (_event, serverId) => callCoreManager("start", validateCoreServer(serverId)));
   ipcMain.handle("core:stop", () => callCoreManager("stop"));
   ipcMain.handle("core:restart", (_event, serverId) => {
@@ -387,10 +410,94 @@ function registerIpcHandlers() {
       subscriptions: normalizedSubscriptions,
       servers: normalizedServers,
       selectedServerId: typeof payload.selectedServerId === "string" ? payload.selectedServerId : null,
+      favorites: Array.isArray(payload.favorites) ? payload.favorites : [],
       settings: payload.settings && typeof payload.settings === "object" ? payload.settings : {}
     }, null, 2)}\n`, "utf8");
     return true;
   });
+}
+
+function currentSavedServer() {
+  const config = configStore.load().config;
+  const server = config.servers.find((item) => item.id === config.selectedServerId);
+  if (!server) return null;
+  return { config, server };
+}
+
+function updateTrayStatus(status) {
+  trayStatus = status || trayStatus;
+  if (!tray) return;
+  const saved = currentSavedServer();
+  const connected = Boolean(trayStatus.running || trayStatus.code === "PROXY_RESTORE_FAILED");
+  const menuItems = [
+    { label: "Choobs", enabled: false },
+    { type: "separator" },
+    {
+      label: connected ? "Disconnect" : "Connect",
+      enabled: !trayActionPending && (connected || Boolean(saved)),
+      click: async () => {
+        if (trayActionPending) return;
+        trayActionPending = true;
+        updateTrayStatus(trayStatus);
+        try {
+          const status = connected
+            ? await callCoreManager("stop", undefined, true)
+            : await callCoreManager("start", validateCoreServer(saved.server.id), true);
+          updateTrayStatus(status);
+          if (status.state !== "running" && status.state !== "stopped") {
+            tray.displayBalloon({
+              title: "Choobs",
+              content: status.error || "The requested connection action failed."
+            });
+          }
+        } catch (error) {
+          tray.displayBalloon({ title: "Choobs", content: error.message });
+        } finally {
+          trayActionPending = false;
+          updateTrayStatus(trayStatus);
+        }
+      }
+    },
+    {
+      label: saved ? `Server: ${saved.server.location || saved.server.name}` : "No server selected",
+      enabled: false
+    },
+    { type: "separator" },
+    {
+      label: "Open Choobs",
+      click: () => {
+        if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+        mainWindow.show();
+        mainWindow.focus();
+      }
+    },
+    {
+      label: "Exit",
+      click: () => {
+        exitRequested = true;
+        app.quit();
+      }
+    }
+  ];
+  tray.setContextMenu(Menu.buildFromTemplate(menuItems));
+}
+
+function createTray() {
+  if (process.platform !== "win32" || tray) return;
+  tray = new Tray(nativeImage.createFromPath(path.join(iconDirectory, "choobs-32.png")));
+  tray.setToolTip("Choobs");
+  tray.on("click", () => {
+    if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+    mainWindow.show();
+    mainWindow.focus();
+  });
+  updateTrayStatus(trayStatus);
+}
+
+function shouldMinimizeToTray() {
+  if (!configStore) return false;
+  return configStore.load().config.settings.minimizeToTray
+    || Boolean(trayStatus.running || trayStatus.code === "PROXY_RESTORE_FAILED");
 }
 
 function createWindow() {
@@ -400,6 +507,10 @@ function createWindow() {
     minWidth: 360,
     minHeight: 560,
     backgroundColor: "#111315",
+    icon: path.join(
+      iconDirectory,
+      process.platform === "win32" ? "choobs.ico" : "choobs-256.png"
+    ),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -408,6 +519,12 @@ function createWindow() {
   });
 
   mainWindow.loadFile(path.join(__dirname, "app", "index.html"));
+  mainWindow.on("close", (event) => {
+    if (!quitAfterCoreStop && !exitRequested && shouldMinimizeToTray()) {
+      event.preventDefault();
+      mainWindow.hide();
+    }
+  });
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
@@ -416,15 +533,18 @@ function createWindow() {
 if (ownsSingleInstanceLock) {
   app.whenReady().then(() => {
     configStore = new ConfigStore(path.join(app.getPath("userData"), "choobs-config.json"));
+    configStore.load({ resetSelection: true });
     registerIpcHandlers();
+    createTray();
     createWindow();
+    if (process.argv.includes("--hidden") && shouldMinimizeToTray()) mainWindow.hide();
   });
 } else {
   app.quit();
 }
 
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
+  if (process.platform !== "darwin" && !(tray && shouldMinimizeToTray())) app.quit();
 });
 
 let quitAfterCoreStop = false;
@@ -446,16 +566,50 @@ app.on("before-quit", (event) => {
     app.quit();
   }).catch(async (error) => {
     quitAfterCoreStop = false;
-    await dialog.showMessageBox(mainWindow, {
+    exitRequested = false;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.show();
+      await dialog.showMessageBox(mainWindow, {
+        type: "warning",
+        title: "Choobs could not safely disconnect",
+        message: "Choobs will remain open so you can retry disconnecting.",
+        detail: error.message,
+        buttons: ["Keep Choobs open"]
+      });
+    } else if (tray) {
+      tray.displayBalloon({
+        title: "Choobs could not safely disconnect",
+        content: "Choobs remains available in the system tray. Open it to retry disconnecting."
+      });
+    } else {
+      await dialog.showMessageBox({
       type: "warning",
       title: "Choobs could not safely disconnect",
       message: "Choobs will remain open so you can retry disconnecting.",
       detail: error.message,
       buttons: ["Keep Choobs open"]
-    });
+      });
+    }
   });
+});
+
+app.on("will-quit", () => {
+  if (tray) {
+    tray.destroy();
+    tray = null;
+  }
 });
 
 app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  if (mainWindow) {
+    mainWindow.show();
+    mainWindow.focus();
+  }
+});
+
+app.on("second-instance", () => {
+  if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+  mainWindow.show();
+  mainWindow.focus();
 });

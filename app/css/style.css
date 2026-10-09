@@ -152,6 +152,29 @@ button:focus-visible {
   letter-spacing: 0.1px;
 }
 
+.connection-stats {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin-top: 9px;
+  color: #89938c;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.connection-stats[hidden] {
+  display: none;
+}
+
+.status[data-state="failed"] {
+  color: #d49a91;
+}
+
+.status[data-warning="true"] {
+  color: #d2b98b;
+}
+
 .toast {
   position: fixed;
   z-index: 20;
@@ -211,6 +234,7 @@ button:focus-visible {
 .server-actions {
   display: flex;
   flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
   margin-bottom: 10px;
 }
@@ -376,6 +400,35 @@ button:focus-visible {
   transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
 }
 
+.server-favorite {
+  flex: 0 0 42px;
+  border: 1px solid #242827;
+  border-left: 0;
+  background: #191c1d;
+  color: #8b9b8d;
+  cursor: pointer;
+  font-size: 17px;
+  transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
+}
+
+.server-entry:not(.manual) .server-favorite {
+  border-radius: 0 11px 11px 0;
+}
+
+.server-favorite[aria-pressed="true"] {
+  color: #dfc979;
+}
+
+.server-favorite:hover:not(:disabled) {
+  border-color: #373d39;
+  background: #222624;
+}
+
+.server-favorite:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
 .server-edit:hover:not(:disabled) {
   border-color: #373d39;
   background: #222624;
@@ -385,6 +438,11 @@ button:focus-visible {
 .server-edit:disabled {
   cursor: default;
   opacity: 0.55;
+}
+
+.connect-button:disabled {
+  cursor: default;
+  opacity: 0.9;
 }
 
 .add-server {

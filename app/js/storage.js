@@ -6,10 +6,12 @@
     return {
       servers: [],
       subscriptions: [],
+      favorites: [],
       selectedServerId: null,
       settings: {
         startWithWindows: false,
         autoConnect: false,
+        autoConnectBestServer: false,
         minimizeToTray: false,
         connectionMode: "System Proxy",
         rememberSelectedServer: true,
@@ -54,6 +56,9 @@
           settings[key] = config.settings[key];
         }
       });
+      if (typeof config.settings.autoConnect !== "boolean" && typeof config.settings.connectOnStart === "boolean") {
+        settings.autoConnect = config.settings.connectOnStart;
+      }
     }
     if (["System Proxy", "TUN", "Auto"].indexOf(settings.connectionMode) === -1) {
       settings.connectionMode = defaults.settings.connectionMode;
@@ -62,14 +67,18 @@
       settings.subscriptionUpdateInterval = "manual";
     }
 
+    var selectedExists = servers.some(function (server) { return server.id === config.selectedServerId; });
     var selectedServerId = settings.rememberSelectedServer
-      && servers.some(function (server) { return server.id === config.selectedServerId; })
-      ? config.selectedServerId
+      ? (selectedExists ? config.selectedServerId : (config.selectedServerId ? null : (servers.length ? servers[0].id : null)))
       : (servers.length ? servers[0].id : null);
 
+    var favorites = Array.isArray(config.favorites)
+      ? Array.from(new Set(config.favorites.filter(function (id) { return typeof id === "string" && id.trim(); })))
+      : [];
     return {
       servers: servers,
       subscriptions: subscriptions,
+      favorites: favorites,
       selectedServerId: selectedServerId,
       settings: settings
     };
@@ -247,6 +256,13 @@
     return Promise.reject(new Error("TCP ping checks are unavailable in browser preview."));
   }
 
+  function setStartWithWindows(enabled) {
+    if (desktopApi && typeof desktopApi.setStartWithWindows === "function") {
+      return desktopApi.setStartWithWindows(Boolean(enabled));
+    }
+    return Promise.resolve(false);
+  }
+
   global.ChoobsStorage = {
     isPreview: !(desktopApi && typeof desktopApi.loadConfig === "function"),
     loadConfig: loadConfig,
@@ -254,6 +270,7 @@
     importServers: importServers,
     exportServers: exportServers,
     fetchSubscription: fetchSubscription,
-    pingServer: pingServer
+    pingServer: pingServer,
+    setStartWithWindows: setStartWithWindows
   };
 }(window));

@@ -16,6 +16,10 @@ test("preload exposes restricted core IPC and main validates the stored server",
   const userData = fs.mkdtempSync(path.join(os.tmpdir(), "choobs-core-ipc-"));
   const managerRequests = [];
   const closeWarnings = [];
+  const trayInstances = [];
+  const browserWindows = [];
+  const rendererEvents = new EventEmitter();
+  let loginItemSettings = { openAtLogin: false };
   let stopStatus = { running: false, pid: null, state: "stopped" };
   let quitCount = 0;
   const originalHttpsGet = https.get;
@@ -26,23 +30,54 @@ test("preload exposes restricted core IPC and main validates the stored server",
   app.getAppPath = () => applicationDirectory;
   app.getPath = (name) => name === "userData" ? userData : os.tmpdir();
   app.quit = () => { quitCount += 1; };
+  app.setLoginItemSettings = (settings) => { loginItemSettings = settings; };
+  app.getLoginItemSettings = () => loginItemSettings;
+  const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+  Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
 
   let managerChild;
+  let appWindow;
   let spawnDetails;
   const originalExistsSync = fs.existsSync;
   const originalLoad = Module._load;
   fs.existsSync = function (filePath) {
-    if (path.basename(filePath) === "choobs-core-manager") return true;
+    if (path.basename(filePath).startsWith("choobs-core-manager")) return true;
     return originalExistsSync.call(this, filePath);
   };
 
   const electron = {
     app,
-    BrowserWindow: class {
+    BrowserWindow: class extends EventEmitter {
+      constructor(options) {
+        super();
+        this.options = options;
+        this.visible = true;
+        this.webContents = {
+          send(channel, ...args) { rendererEvents.emit(channel, {}, ...args); }
+        };
+        browserWindows.push(this);
+      }
       loadFile() {}
-      on() {}
-      static getAllWindows() { return []; }
+      isDestroyed() { return false; }
+      hide() { this.visible = false; }
+      show() { this.visible = true; }
+      focus() {}
+      static getAllWindows() { return browserWindows; }
     },
+    Menu: { buildFromTemplate: (template) => template },
+    Tray: class extends EventEmitter {
+      constructor(icon) {
+        super();
+        this.icon = icon;
+        this.balloons = [];
+        trayInstances.push(this);
+      }
+      setToolTip(value) { this.tooltip = value; }
+      setContextMenu(value) { this.menu = value; }
+      displayBalloon(value) { this.balloons.push(value); }
+      destroy() {}
+    },
+    nativeImage: { createFromPath: (value) => value },
     dialog: {
       showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
       showSaveDialog: async () => ({ canceled: true }),
@@ -55,6 +90,8 @@ test("preload exposes restricted core IPC and main validates the stored server",
       exposeInMainWorld(name, value) { exposed[name] = value; }
     },
     ipcRenderer: {
+      on: (...args) => rendererEvents.on(...args),
+      removeListener: (...args) => rendererEvents.removeListener(...args),
       invoke(name, ...args) {
         const handler = handlers.get(name);
         if (!handler) return Promise.reject(new Error(`No IPC handler for ${name}`));
@@ -111,6 +148,7 @@ test("preload exposes restricted core IPC and main validates the stored server",
     fs.rmSync(userData, { recursive: true, force: true });
     delete require.cache[require.resolve("../main.js")];
     delete require.cache[require.resolve("../preload.js")];
+    Object.defineProperty(process, "platform", originalPlatform);
   });
 
   require("../main.js");
@@ -204,7 +242,7 @@ test("preload exposes restricted core IPC and main validates the stored server",
   const startRequest = managerRequests.find((request) => request.command === "start");
   assert.equal(startRequest.server.address, "example.net");
   assert.equal("executablePath" in startRequest.server, false);
-  assert.equal(spawnDetails[0], path.join(applicationDirectory, "backend", "choobs-core-manager"));
+  assert.equal(spawnDetails[0], path.join(applicationDirectory, "backend", "choobs-core-manager.exe"));
   assert.notEqual(spawnDetails[2].shell, true);
 
   const rejected = await exposed.choobs.startCore({
@@ -225,6 +263,37 @@ test("preload exposes restricted core IPC and main validates the stored server",
 
   const stopped = await exposed.choobs.stopCore();
   assert.equal(stopped.state, "stopped");
+  assert.equal(trayInstances.length, 1);
+  assert.equal(trayInstances[0].tooltip, "Choobs");
+  assert.equal(trayInstances[0].icon, path.join(applicationDirectory, "assets", "icons", "choobs-32.png"));
+  assert.equal(browserWindows[0].options.icon, path.join(applicationDirectory, "assets", "icons", "choobs.ico"));
+
+  let trayStatus;
+  const removeCoreStatusListener = exposed.choobs.onCoreStatus((value) => { trayStatus = value; });
+  appWindow = browserWindows[0];
+  appWindow.webContents.send("core:status-changed", { state: "running", running: true });
+  assert.equal(trayStatus.state, "running");
+  removeCoreStatusListener();
+
+  await exposed.choobs.setStartWithWindows(true);
+  assert.equal(loginItemSettings.openAtLogin, true);
+  assert.equal(loginItemSettings.path, process.execPath);
+  await exposed.choobs.setStartWithWindows(false);
+  assert.equal(loginItemSettings.openAtLogin, false);
+
+  const trayConnect = trayInstances[0].menu.find((item) => item.label === "Connect");
+  assert.ok(trayConnect);
+  await trayConnect.click();
+  assert.equal(managerRequests.filter((request) => request.command === "start").length, 2);
+  assert.ok(trayInstances[0].balloons.length > 0);
+
+  const minimizeConfig = await exposed.choobs.loadConfig();
+  minimizeConfig.config.settings.minimizeToTray = true;
+  await exposed.choobs.saveConfig(minimizeConfig.config);
+  let closePrevented = false;
+  appWindow.emit("close", { preventDefault() { closePrevented = true; } });
+  assert.equal(closePrevented, true);
+  assert.equal(appWindow.visible, false);
 
   stopStatus = {
     running: true,
@@ -233,15 +302,19 @@ test("preload exposes restricted core IPC and main validates the stored server",
     code: "PROXY_RESTORE_FAILED",
     error: "Could not restore previous Windows proxy settings."
   };
+  const failedExit = trayInstances[0].menu.find((item) => item.label === "Exit");
+  await failedExit.click();
   let prevented = false;
   app.emit("before-quit", { preventDefault() { prevented = true; } });
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(prevented, true);
-  assert.equal(quitCount, 0);
+  assert.equal(quitCount, 1);
   assert.match(closeWarnings[0].message, /remain open/);
 
   stopStatus = { running: false, pid: null, state: "stopped" };
+  const safeExit = trayInstances[0].menu.find((item) => item.label === "Exit");
+  await safeExit.click();
   app.emit("before-quit", { preventDefault() {} });
   await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(quitCount, 1);
+  assert.equal(quitCount, 3);
 });

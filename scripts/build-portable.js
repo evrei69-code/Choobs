@@ -12,6 +12,13 @@ const appOutputPath = path.join(root, "dist", "win-unpacked");
 const payloadPath = path.join(root, "dist", ".choobs-runtime.zip");
 const bootstrapPath = path.join(root, "dist", ".Choobs-bootstrap.exe");
 const outputPath = path.join(root, "dist", "Choobs.exe");
+const bootstrapIconResourcePath = path.join(
+  backend,
+  "cmd",
+  "choobs-bootstrap",
+  "choobs_windows_amd64.syso"
+);
+const iconPath = path.join(root, "assets", "icons", "choobs.ico");
 const expectedSingBoxHash = "99fb67d576d13fcdb9bf938f393a6d2016da306b9eff853dbdbc75e2092443cc";
 const applicationVersion = require("../package.json").version;
 const electronVersion = require("electron/package.json").version;
@@ -91,6 +98,9 @@ function build() {
   if (!fs.existsSync(singBoxPath)) {
     throw new Error("Required Windows x64 sing-box binary is missing from core/bin/sing-box.exe.");
   }
+  if (!fs.existsSync(iconPath)) {
+    throw new Error("Required Windows application icon is missing from assets/icons/choobs.ico.");
+  }
   const singBoxHash = crypto.createHash("sha256").update(fs.readFileSync(singBoxPath)).digest("hex");
   if (singBoxHash !== expectedSingBoxHash) {
     throw new Error("core/bin/sing-box.exe does not match the verified Windows 7 legacy binary checksum.");
@@ -149,6 +159,13 @@ function build() {
 
     const ldflags = `-s -w -H=windowsgui -X main.expectedPayloadHash=${payloadHash} -X main.applicationVersion=${applicationVersion}`;
     run(go, [
+      "run",
+      "github.com/akavel/rsrc@v0.10.2",
+      "-arch", "amd64",
+      "-ico", iconPath,
+      "-o", bootstrapIconResourcePath
+    ], { env: { ...process.env, GOTOOLCHAIN: "local" } });
+    run(go, [
       "build",
       "-C", path.join(backend, "cmd", "choobs-bootstrap"),
       "-trimpath",
@@ -177,6 +194,7 @@ function build() {
     verifyWindowsX64GuiExecutable(outputPath);
     console.log(`Single-file Windows x64 Choobs executable created: ${path.relative(root, outputPath)}`);
   } finally {
+    fs.rmSync(bootstrapIconResourcePath, { force: true });
     cleanBuildOutputs();
   }
 }

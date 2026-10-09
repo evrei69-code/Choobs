@@ -8,10 +8,12 @@ function defaultConfig() {
   return {
     servers: [],
     subscriptions: [],
+    favorites: [],
     selectedServerId: null,
     settings: {
       startWithWindows: false,
       autoConnect: false,
+      autoConnectBestServer: false,
       minimizeToTray: false,
       connectionMode: "System Proxy",
       rememberSelectedServer: true,
@@ -90,7 +92,7 @@ function normalizeSubscription(subscription, index) {
   };
 }
 
-function normalizeConfig(value) {
+function normalizeConfig(value, options) {
   const fallback = defaultConfig();
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return { config: fallback, warning: "Configuration was invalid; default settings were loaded." };
@@ -140,6 +142,7 @@ function normalizeConfig(value) {
   [
     "startWithWindows",
     "autoConnect",
+    "autoConnectBestServer",
     "minimizeToTray",
     "rememberSelectedServer",
     "connectOnStart",
@@ -147,6 +150,9 @@ function normalizeConfig(value) {
   ].forEach((key) => {
     if (typeof inputSettings[key] === "boolean") settings[key] = inputSettings[key];
   });
+  if (typeof inputSettings.autoConnect !== "boolean" && typeof inputSettings.connectOnStart === "boolean") {
+    settings.autoConnect = inputSettings.connectOnStart;
+  }
   if (CONNECTION_MODES.indexOf(inputSettings.connectionMode) !== -1) {
     settings.connectionMode = inputSettings.connectionMode;
   }
@@ -163,13 +169,16 @@ function normalizeConfig(value) {
     return copy;
   });
 
-  const selectedServerId = settings.rememberSelectedServer
-    && servers.some((server) => server.id === value.selectedServerId)
-    ? value.selectedServerId
-    : (servers.length ? servers[0].id : null);
+  const selectedServerExists = servers.some((server) => server.id === value.selectedServerId);
+  const selectedServerId = options && options.resetSelection && !settings.rememberSelectedServer
+    ? (servers[0] ? servers[0].id : null)
+    : (selectedServerExists ? value.selectedServerId : (value.selectedServerId ? null : (servers[0] ? servers[0].id : null)));
+  const favorites = Array.isArray(value.favorites)
+    ? Array.from(new Set(value.favorites.filter((id) => typeof id === "string" && id.trim()).map((id) => id.trim())))
+    : [];
 
   return {
-    config: { servers, subscriptions, selectedServerId, settings },
+    config: { servers, subscriptions, favorites, selectedServerId, settings },
     warning
   };
 }
@@ -179,7 +188,7 @@ class ConfigStore {
     this.filePath = filePath;
   }
 
-  load() {
+  load(options) {
     if (!fs.existsSync(this.filePath)) {
       const config = defaultConfig();
       this.save(config);
@@ -188,7 +197,7 @@ class ConfigStore {
 
     try {
       const raw = fs.readFileSync(this.filePath, "utf8");
-      const result = normalizeConfig(JSON.parse(raw));
+      const result = normalizeConfig(JSON.parse(raw), options);
       this.save(result.config);
       return result;
     } catch (error) {

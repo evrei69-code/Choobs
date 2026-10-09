@@ -273,6 +273,60 @@ test("subscription parser safely rejects malformed Base64 and handles empty cont
   assert.equal(empty.diagnostics.lineCount, 0);
 });
 
+test("subscription refresh replaces servers only after a valid non-empty parse and keeps favorites", async () => {
+  const uri = "vless://11111111-2222-4333-8444-555555555555@node.example:443?security=reality&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sid=abcd&sni=front.example&fp=chrome&flow=xtls-rprx-vision#Finland%20Helsinki";
+  const server = {
+    id: "stable-server-id",
+    name: "Finland Helsinki",
+    location: "Helsinki",
+    flag: "🇫🇮",
+    address: "node.example",
+    port: 443,
+    protocol: "VLESS",
+    source: "subscription-one",
+    ping: 42,
+    uri
+  };
+  const originalFetch = globalThis.ChoobsStorage;
+  const config = {
+    servers: [server],
+    subscriptions: [{
+      id: "subscription-one",
+      name: "Primary",
+      url: "https://subscriptions.example/safe",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      servers: [server]
+    }],
+    favorites: ["stable-server-id", "orphaned-server-id"],
+    selectedServerId: "stable-server-id",
+    settings: { rememberSelectedServer: true }
+  };
+  try {
+    globalThis.ChoobsStorage = { fetchSubscription: async () => ({ text: uri }) };
+    const refreshed = await globalThis.SubscriptionManager.refresh(config, "subscription-one");
+    assert.deepEqual(refreshed.config.favorites, config.favorites);
+    assert.equal(refreshed.config.servers[0].id, "stable-server-id");
+    assert.equal(refreshed.config.servers[0].ping, 42);
+    assert.equal(refreshed.config.selectedServerId, "stable-server-id");
+    assert.notEqual(refreshed.config.subscriptions[0].updatedAt, config.subscriptions[0].updatedAt);
+
+    globalThis.ChoobsStorage = { fetchSubscription: async () => { throw new Error("synthetic fetch failure"); } };
+    await assert.rejects(globalThis.SubscriptionManager.refresh(config, "subscription-one"), /synthetic fetch failure/);
+    assert.equal(config.servers[0].id, "stable-server-id");
+    assert.equal(config.subscriptions[0].servers[0].uri, uri);
+
+    globalThis.ChoobsStorage = { fetchSubscription: async () => ({ text: "\uFEFF \r\n" }) };
+    await assert.rejects(
+      globalThis.SubscriptionManager.refresh(config, "subscription-one"),
+      /No supported VPN servers were found/
+    );
+    assert.equal(config.servers.length, 1);
+    assert.deepEqual(config.favorites, ["stable-server-id", "orphaned-server-id"]);
+  } finally {
+    globalThis.ChoobsStorage = originalFetch;
+  }
+});
+
 test("subscription name is optional and secret URL components are hidden", async () => {
   const previousStorage = globalThis.ChoobsStorage;
   globalThis.ChoobsStorage = {

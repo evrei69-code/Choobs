@@ -530,6 +530,7 @@
           servers: (subscription.servers || []).map(function (server) { return Object.assign({}, server); })
         });
       }),
+      favorites: Array.isArray(config.favorites) ? config.favorites.slice() : [],
       selectedServerId: config.selectedServerId,
       settings: Object.assign({}, config.settings)
     };
@@ -581,6 +582,7 @@
       var matching = server.uri && previousByUri[server.uri] ? previousByUri[server.uri].shift() : null;
       if (!matching) return server;
       server.id = matching.id;
+      if (matching.ping !== null && typeof matching.ping !== "undefined") server.ping = matching.ping;
       return server;
     });
     var updated = cloneConfig(config);

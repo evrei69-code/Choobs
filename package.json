@@ -8,7 +8,8 @@
     "preview": "node scripts/preview-server.js",
     "build:win:portable": "node scripts/build-portable.js",
     "test:ipc": "node --test tests/core-ipc.test.js",
-    "test:subscriptions": "node --test tests/subscriptions.test.js"
+    "test:subscriptions": "node --test tests/subscriptions.test.js",
+    "test:ui": "node --test tests/ui-state.test.js tests/config-store.test.js"
   },
   "devDependencies": {
     "electron": "22.3.27",
@@ -29,6 +30,7 @@
       "preload.js",
       "config-store.js",
       "app/**/*",
+      "assets/icons/**/*",
       "package.json"
     ],
     "extraResources": [
@@ -49,7 +51,8 @@
       }
     ],
     "win": {
-      "signAndEditExecutable": false,
+      "icon": "assets/icons/choobs.ico",
+      "signExecutable": false,
       "target": [
         {
           "target": "dir",

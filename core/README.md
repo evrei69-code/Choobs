@@ -73,7 +73,7 @@ to parse and display, but cannot yet be started by the Core Manager.
 The successful proxied HTTPS/IP check verifies a connection through the
 configured local proxy and selected sing-box route; it does not redirect all
 Windows traffic or prove that every destination/application is reachable.
-No TUN, system proxy, DNS interception, routing policy, kill switch, tray, or
+No TUN, system proxy, DNS interception, routing policy, kill switch, or
 installer is implemented.
 
 ## Build and test
@@ -96,11 +96,13 @@ GOTOOLCHAIN=go1.20.14 npm run build:win:portable
 
 The build script verifies the pinned `core/bin/sing-box.exe` SHA-256, cross
 compiles `backend/choobs-core-manager.exe` with `CGO_ENABLED=0`, `GOOS=windows`,
-and `GOARCH=amd64`, then invokes electron-builder's **portable x64** target.
-It refuses to build the manager unless `go version` reports Go 1.20.14.
-The portable application includes the manager, sing-box, and `core/configs/`
-under its resources directory; it does not create an installer. The artifact
-is written to `dist/Choobs-0.1.0-Windows-x64-portable.exe`.
+and `GOARCH=amd64`, then invokes electron-builder's Windows x64 directory
+target. The Choobs ICO is configured as the Windows executable icon, and the
+Go bootstrap embeds the same icon resource in the final single-file
+`dist/Choobs.exe`. PNG and ICO assets are included in `app.asar` for the window
+and tray at runtime. The script refuses to build unless `go version` reports
+Go 1.20.14. The portable application includes the manager, sing-box, and
+`core/configs/` under its resources directory; it does not create an installer.
 
 ```powershell
 $env:GOTOOLCHAIN = "go1.20.14"
@@ -109,7 +111,7 @@ npm ci
 npm run build:win:portable
 ```
 
-This pins Electron to 22.3.27 and electron-builder to 24.13.3. The package
+This pins Electron to 22.3.27 and electron-builder to 26.15.3. The package
 target and architecture do not prove runtime compatibility on Windows 7; test
 the resulting artifact on a Windows 7 x64 system before using it.
 
