@@ -30,7 +30,7 @@ jobs:
         run: npm ci
 
       - name: Build Windows installer
-        run: npm run build:win
+        run: npm run build:win:portable
         env:
           GOTOOLCHAIN: go1.20.14
 
@@ -38,6 +38,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Choobs-Windows-Installer
-          path: dist/*Setup.exe
+          path: dist/Choobs.exe
           if-no-files-found: error
           retention-days: 14
