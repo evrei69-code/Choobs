@@ -1,43 +1,72 @@
-
 name: Build Choobs for Windows
 
 on:
-  workflow_dispatch:
+workflow_dispatch:
 
 permissions:
-  contents: read
+contents: read
 
 jobs:
-  build:
-    runs-on: windows-2022
+build:
+runs-on: windows-2022
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+```
+steps:
+  - name: Checkout repository
+    uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
+  - name: Setup Node.js
+    uses: actions/setup-node@v4
+    with:
+      node-version: 20
+      cache: npm
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.20.14'
+  - name: Setup Go
+    uses: actions/setup-go@v5
+    with:
+      go-version: '1.20.14'
 
-      - name: Install dependencies
-        run: npm ci
+  - name: Install dependencies
+    run: npm ci
 
-      - name: Build Windows installer
-        run: npm run build:win:portable
-        env:
-          GOTOOLCHAIN: go1.20.14
+  - name: Download and verify sing-box for Windows 7
+    shell: pwsh
+    run: |
+      $url = "https://github.com/SagerNet/sing-box/releases/download/v1.10.7/sing-box-1.10.7-windows-amd64-legacy.zip"
+      $zip = Join-Path $env:RUNNER_TEMP "sing-box.zip"
+      $extract = Join-Path $env:RUNNER_TEMP "sing-box-extracted"
 
-      - name: Upload installer
-        uses: actions/upload-artifact@v4
-        with:
-          name: Choobs-Windows-Installer
-          path: dist/Choobs.exe
-          if-no-files-found: error
-          retention-days: 14
+      Invoke-WebRequest -Uri $url -OutFile $zip
+      Expand-Archive -Path $zip -DestinationPath $extract -Force
+
+      $binary = Get-ChildItem -Path $extract -Filter "sing-box.exe" -Recurse | Select-Object -First 1
+
+      if (-not $binary) {
+        throw "sing-box.exe was not found in the downloaded archive."
+      }
+
+      New-Item -ItemType Directory -Path "core/bin" -Force | Out-Null
+      Copy-Item $binary.FullName "core/bin/sing-box.exe" -Force
+
+      $hash = (Get-FileHash "core/bin/sing-box.exe" -Algorithm SHA256).Hash.ToLower()
+
+      if ($hash -ne "99fb67d576d13fcdb9bf938f393a6d2016da306b9eff853dbdbc75e2092443cc") {
+        throw "sing-box SHA-256 verification failed: $hash"
+      }
+
+      Write-Host "sing-box downloaded and verified successfully."
+
+  - name: Build Choobs portable executable
+    run: npm run build:win:portable
+    env:
+      GOTOOLCHAIN: go1.20.14
+
+  - name: Upload Choobs executable
+    uses: actions/upload-artifact@v4
+    with:
+      name: Choobs-Windows-Portable
+      path: dist/Choobs.exe
+      if-no-files-found: error
+      retention-days: 14
+```   
+ 
