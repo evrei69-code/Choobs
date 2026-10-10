@@ -1,109 +1,113 @@
+
 name: Build Choobs for Windows 7
 
 on:
-workflow_dispatch:
+  workflow_dispatch:
 
 permissions:
-contents: read
+  contents: read
 
 jobs:
-build:
-name: Build portable Choobs.exe
-runs-on: windows-2022 steps:
-  - name: Download repository
-    uses: actions/checkout@v4
+  build:
+    name: Build portable Choobs.exe
+    runs-on: windows-2022
 
-  - name: Install Node.js
-    uses: actions/setup-node@v4
-    with:
-      node-version: 20
-      cache: npm
+    steps:
+      - name: Download repository
+        uses: actions/checkout@v4
 
-  - name: Install Go
-    uses: actions/setup-go@v5
-    with:
-      go-version: '1.20.14'
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
 
-  - name: Install npm dependencies
-    run: npm ci
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.20.14'
 
-  - name: Download sing-box for Windows 7
-    shell: pwsh
-    run: |
-      $ErrorActionPreference = "Stop"
+      - name: Install npm dependencies
+        run: npm ci
 
-      $url = "https://github.com/SagerNet/sing-box/releases/download/v1.10.7/sing-box-1.10.7-windows-amd64-legacy.zip"
-      $zip = Join-Path $env:RUNNER_TEMP "sing-box.zip"
-      $extract = Join-Path $env:RUNNER_TEMP "sing-box-extracted"
+      - name: Download sing-box for Windows 7
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
 
-      Invoke-WebRequest -Uri $url -OutFile $zip
-      Expand-Archive -Path $zip -DestinationPath $extract -Force
+          $url = "https://github.com/SagerNet/sing-box/releases/download/v1.10.7/sing-box-1.10.7-windows-amd64-legacy.zip"
+          $zip = Join-Path $env:RUNNER_TEMP "sing-box.zip"
+          $extract = Join-Path $env:RUNNER_TEMP "sing-box-extracted"
 
-      $binary = Get-ChildItem -Path $extract -Filter "sing-box.exe" -Recurse | Select-Object -First 1
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $extract -Force
 
-      if ($null -eq $binary) {
-        throw "sing-box.exe was not found in the archive."
-      }
+          $binary = Get-ChildItem -Path $extract -Filter "sing-box.exe" -Recurse | Select-Object -First 1
 
-      New-Item -ItemType Directory -Path "core/bin" -Force | Out-Null
-      Copy-Item -Path $binary.FullName -Destination "core/bin/sing-box.exe" -Force
+          if ($null -eq $binary) {
+            throw "sing-box.exe was not found in the archive."
+          }
 
-      $expectedHash = "99fb67d576d13fcdb9bf938f393a6d2016da306b9eff853dbdbc75e2092443cc"
-      $actualHash = (Get-FileHash "core/bin/sing-box.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          New-Item -ItemType Directory -Path "core/bin" -Force | Out-Null
+          Copy-Item -Path $binary.FullName -Destination "core/bin/sing-box.exe" -Force
 
-      if ($actualHash -ne $expectedHash) {
-        throw "SHA-256 mismatch. Expected $expectedHash but received $actualHash"
-      }
+          $expectedHash = "99fb67d576d13fcdb9bf938f393a6d2016da306b9eff853dbdbc75e2092443cc"
+          $actualHash = (Get-FileHash "core/bin/sing-box.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
 
-      Write-Host "sing-box downloaded and checksum verified."
+          if ($actualHash -ne $expectedHash) {
+            throw "SHA-256 mismatch. Expected $expectedHash but received $actualHash"
+          }
 
-  - name: Verify required project files
-    shell: pwsh
-    run: |
-      $ErrorActionPreference = "Stop"
+          Write-Host "sing-box downloaded and checksum verified."
 
-      $requiredFiles = @(
-        "package.json",
-        "scripts/build-portable.js",
-        "core/bin/sing-box.exe"
-      )
+      - name: Verify required project files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
 
-      foreach ($file in $requiredFiles) {
-        if (-not (Test-Path $file)) {
-          throw "Required file is missing: $file"
-        }
-      }
+          $requiredFiles = @(
+            "package.json",
+            "scripts/build-portable.js",
+            "core/bin/sing-box.exe"
+          )
 
-      Write-Host "Required files are present."
+          foreach ($file in $requiredFiles) {
+            if (-not (Test-Path $file)) {
+              throw "Required file is missing: $file"
+            }
+          }
 
-  - name: Build Choobs.exe
-    run: npm run build:win:portable
-    env:
-      GOTOOLCHAIN: go1.20.14
+          Write-Host "Required files are present."
 
-  - name: Verify output
-    shell: pwsh
-    run: |
-      $ErrorActionPreference = "Stop"
-      $output = "dist/Choobs.exe"
+      - name: Build Choobs.exe
+        run: npm run build:win:portable
+        env:
+          GOTOOLCHAIN: go1.20.14
 
-      if (-not (Test-Path $output)) {
-        throw "Build failed: dist/Choobs.exe was not created."
-      }
+      - name: Verify output
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $output = "dist/Choobs.exe"
 
-      $file = Get-Item $output
+          if (-not (Test-Path $output)) {
+            throw "Build failed: dist/Choobs.exe was not created."
+          }
 
-      if ($file.Length -le 0) {
-        throw "Build failed: Choobs.exe is empty."
-      }
+          $file = Get-Item $output
 
-      Write-Host "Build completed: $output"
-      Write-Host "Size: $($file.Length) bytes"
+          if ($file.Length -le 0) {
+            throw "Build failed: Choobs.exe is empty."
+          }
 
-  - name: Upload portable executable
-    uses: actions/upload-artifact@v4
-    with:
-      name: Choobs-Windows-Portable
-      path: dist/Choobs.exe
-      if-no-files-found: error
-      retention-days: 14
+          Write-Host "Build completed: $output"
+          Write-Host "Size: $($file.Length) bytes"
+
+      - name: Upload portable executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: Choobs-Windows-Portable
+          path: dist/Choobs.exe
+          if-no-files-found: error
+          retention-days: 14
+ 
