@@ -26,11 +26,12 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.20.14'
+          cache: false
 
       - name: Install npm dependencies
         run: npm ci
 
-      - name: Download sing-box for Windows 7
+      - name: Download and verify sing-box
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -45,7 +46,7 @@ jobs:
           $binary = Get-ChildItem -Path $extract -Filter "sing-box.exe" -Recurse | Select-Object -First 1
 
           if ($null -eq $binary) {
-            throw "sing-box.exe was not found in the archive."
+            throw "sing-box.exe was not found in the downloaded archive."
           }
 
           New-Item -ItemType Directory -Path "core/bin" -Force | Out-Null
@@ -60,13 +61,14 @@ jobs:
 
           Write-Host "sing-box downloaded and checksum verified."
 
-      - name: Verify required project files
+      - name: Verify required files
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
           $requiredFiles = @(
             "package.json",
+            "package-lock.json",
             "scripts/build-portable.js",
             "core/bin/sing-box.exe"
           )
@@ -77,14 +79,14 @@ jobs:
             }
           }
 
-          Write-Host "Required files are present."
+          Write-Host "All required files are present."
 
       - name: Build Choobs.exe
         run: npm run build:win:portable
         env:
           GOTOOLCHAIN: go1.20.14
 
-      - name: Verify output
+      - name: Verify build output
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -100,7 +102,8 @@ jobs:
             throw "Build failed: Choobs.exe is empty."
           }
 
-          Write-Host "Build completed: $output"
+          Write-Host "Build completed successfully."
+          Write-Host "File: $output"
           Write-Host "Size: $($file.Length) bytes"
 
       - name: Upload portable executable
@@ -110,4 +113,5 @@ jobs:
           path: dist/Choobs.exe
           if-no-files-found: error
           retention-days: 14
+
  
