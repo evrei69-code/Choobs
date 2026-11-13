@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld("choobs", {
   saveConfig: (config) => ipcRenderer.invoke("choobs:save-config", config),
   importServers: () => ipcRenderer.invoke("choobs:import-servers"),
   exportServers: (data) => ipcRenderer.invoke("choobs:export-servers", data),
+  exportVlessDiagnostics: (serverId) => ipcRenderer.invoke("choobs:export-vless-diagnostics", serverId),
   fetchSubscription: (url) => ipcRenderer.invoke("choobs:fetch-subscription", url),
   pingServer: (server) => ipcRenderer.invoke("choobs:ping-server", server),
   setStartWithWindows: (enabled) => ipcRenderer.invoke("choobs:set-start-with-windows", enabled),

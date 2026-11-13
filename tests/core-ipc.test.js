@@ -14,6 +14,7 @@ test("preload exposes restricted core IPC and main validates the stored server",
   const exposed = {};
   const applicationDirectory = path.resolve(__dirname, "..");
   const userData = fs.mkdtempSync(path.join(os.tmpdir(), "choobs-core-ipc-"));
+  const diagnosticPath = path.join(userData, "vless-diagnostic.md");
   const managerRequests = [];
   const closeWarnings = [];
   const trayInstances = [];
@@ -29,6 +30,7 @@ test("preload exposes restricted core IPC and main validates the stored server",
   app.whenReady = () => Promise.resolve();
   app.getAppPath = () => applicationDirectory;
   app.getPath = (name) => name === "userData" ? userData : os.tmpdir();
+  app.getVersion = () => "0.1.0";
   app.quit = () => { quitCount += 1; };
   app.setLoginItemSettings = (settings) => { loginItemSettings = settings; };
   app.getLoginItemSettings = () => loginItemSettings;
@@ -80,7 +82,7 @@ test("preload exposes restricted core IPC and main validates the stored server",
     nativeImage: { createFromPath: (value) => value },
     dialog: {
       showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
-      showSaveDialog: async () => ({ canceled: true }),
+      showSaveDialog: async () => ({ canceled: false, filePath: diagnosticPath }),
       showMessageBox: async (_window, options) => { closeWarnings.push(options); }
     },
     ipcMain: {
@@ -213,7 +215,7 @@ test("preload exposes restricted core IPC and main validates the stored server",
   );
   https.get = originalHttpsGet;
 
-  for (const method of ["startCore", "stopCore", "restartCore", "getCoreStatus"]) {
+  for (const method of ["startCore", "stopCore", "restartCore", "getCoreStatus", "exportVlessDiagnostics"]) {
     assert.equal(typeof exposed.choobs[method], "function");
   }
 
@@ -227,11 +229,19 @@ test("preload exposes restricted core IPC and main validates the stored server",
     uri: "vless://123e4567-e89b-12d3-a456-426614174000@example.net:443"
   };
   await exposed.choobs.saveConfig({
-    servers: [server],
+    servers: [server, Object.assign({}, server, { id: "saved-vmess", protocol: "VMess" })],
     subscriptions: [],
     selectedServerId: server.id,
     settings: {}
   });
+
+  assert.equal(await exposed.choobs.exportVlessDiagnostics(server.id), true);
+  const diagnosticReport = fs.readFileSync(diagnosticPath, "utf8");
+  assert.match(diagnosticReport, /CHOOBS VLESS DIAGNOSTIC/);
+  assert.equal(diagnosticReport.includes(server.uri), false);
+  assert.equal(diagnosticReport.includes("123e4567-e89b-12d3-a456-426614174000"), false);
+  assert.equal(diagnosticReport.includes("example.net"), false);
+  await assert.rejects(exposed.choobs.exportVlessDiagnostics("saved-vmess"), /only available for VLESS/);
 
   const status = await exposed.choobs.getCoreStatus();
   assert.equal(status.state, "stopped");

@@ -12,6 +12,7 @@ const settingsButton = document.getElementById("settingsButton");
 const addSubscriptionButton = document.getElementById("addSubscription");
 const refreshSubscriptionsButton = document.getElementById("refreshSubscriptions");
 const bestServerButton = document.getElementById("bestServer");
+const exportDiagnosticsButton = document.getElementById("exportDiagnostics");
 const modalOverlay = document.getElementById("modalOverlay");
 const modalTitle = document.getElementById("modalTitle");
 const modalContent = document.getElementById("modalContent");
@@ -267,6 +268,7 @@ function renderServers() {
   bestServerButton.textContent = pingSweepRunning ? "Checking..." : "Best server";
   const currentServer = selectedServer();
   addSubscriptionButton.disabled = connected || connectionPending || pingSweepRunning;
+  exportDiagnosticsButton.disabled = !currentServer || connectionPending || pingSweepRunning || subscriptionRefreshRunning;
 
   if (state.servers.length === 0) {
     const empty = makeElement("div", "empty-servers");
@@ -955,6 +957,25 @@ settingsButton.addEventListener("click", openSettings);
 addSubscriptionButton.addEventListener("click", openAddSubscription);
 refreshSubscriptionsButton.addEventListener("click", refreshAllSubscriptions);
 bestServerButton.addEventListener("click", chooseBestServer);
+exportDiagnosticsButton.addEventListener("click", async () => {
+  const server = selectedServer();
+  if (!server) return;
+  if (server.protocol !== "VLESS") {
+    notify("VLESS diagnostics are only available for VLESS servers.");
+    return;
+  }
+  if (window.ChoobsStorage.isPreview || !window.choobs) {
+    notify("VLESS diagnostic export is available in the desktop app.");
+    return;
+  }
+  try {
+    if (await window.choobs.exportVlessDiagnostics(server.id)) {
+      notify("VLESS diagnostic report saved locally.");
+    }
+  } catch (error) {
+    notify(`Could not export VLESS diagnostics: ${error.message}`);
+  }
+});
 modalClose.addEventListener("click", closeModal);
 
 modalOverlay.addEventListener("click", (event) => {

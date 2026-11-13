@@ -9,6 +9,7 @@ const readline = require("readline");
 const { TextDecoder } = require("util");
 const zlib = require("zlib");
 const { ConfigStore, normalizeServer, normalizeSubscription } = require("./config-store");
+const { createVlessDiagnostic } = require("./app/js/vless-diagnostics");
 
 const iconDirectory = path.join(__dirname, "assets", "icons");
 const ownsSingleInstanceLock = app.requestSingleInstanceLock();
@@ -413,6 +414,31 @@ function registerIpcHandlers() {
       favorites: Array.isArray(payload.favorites) ? payload.favorites : [],
       settings: payload.settings && typeof payload.settings === "object" ? payload.settings : {}
     }, null, 2)}\n`, "utf8");
+    return true;
+  });
+  ipcMain.handle("choobs:export-vless-diagnostics", async (_event, serverId) => {
+    if (typeof serverId !== "string" || !serverId.trim()) {
+      throw new Error("Select a saved server before exporting diagnostics.");
+    }
+    const server = configStore.load().config.servers.find((item) => item.id === serverId);
+    if (!server) throw new Error("Selected server is no longer available.");
+    if (server.protocol !== "VLESS") {
+      throw new Error("VLESS diagnostics are only available for VLESS servers.");
+    }
+
+    const report = createVlessDiagnostic(server, { choobsVersion: app.getVersion() });
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: "Export VLESS diagnostics",
+      defaultPath: "choobs-vless-diagnostic.md",
+      filters: [{ name: "Diagnostic report", extensions: ["md", "txt"] }]
+    });
+    if (result.canceled || !result.filePath) return false;
+
+    const extension = path.extname(result.filePath).toLowerCase();
+    const filePath = extension === ".md" || extension === ".txt"
+      ? result.filePath
+      : `${result.filePath}.md`;
+    fs.writeFileSync(filePath, report, { encoding: "utf8", mode: 0o600 });
     return true;
   });
 }
