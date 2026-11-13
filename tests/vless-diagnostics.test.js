@@ -80,7 +80,8 @@ test("treats unknown-case parameter names and conflicting aliases as unsupported
     `vless://${uuid}@private-server.example:443?security=tls&sni=front-one.example&serverName=front-two.example&TYPE=tcp&customOption=synthetic-secret`
   ));
 
-  assert.match(report, /TYPE: \[MASKED\] — FOUND; NOT RECOGNIZED; NOT SUPPORTED/);
+  assert.match(report, /\[REDACTED_PARAMETER\]: \[MASKED\] — FOUND; NOT RECOGNIZED; NOT SUPPORTED/);
+  assert.equal(report.includes("TYPE"), false);
   assert.match(report, /sni: \[MASKED\] — FOUND; RECOGNIZED; NOT SUPPORTED/);
   assert.match(report, /Conflicting aliases "sni" and "serverName"/);
   assert.equal(report.includes("synthetic-secret"), false);
@@ -127,7 +128,8 @@ test("masks UUID, password, keys, short IDs, tokens, hostnames, SNI, and secret 
   }
   assert.match(report, /Password user-info: \[MASKED\]/);
   assert.match(report, /path: \[PRESENT; VALUE MASKED\]/);
-  assert.match(report, /customCredential: \[MASKED\]/);
+  assert.equal(report.includes("customCredential"), false);
+  assert.match(report, /\[REDACTED_PARAMETER\]: \[MASKED\]/);
 });
 
 test("never exports path content containing nested secrets", () => {
@@ -207,8 +209,40 @@ test("masks values for sensitive parameter-name variants and repeated parameters
   for (const [, value] of parameters) {
     assert.equal(report.includes(value), false, `report exposed ${value}`);
   }
-  for (const name of ["token", "Token", "access_token", "auth", "sig", "key", "secret", "sid"]) {
-    assert.ok(report.includes(`${name}: [MASKED]`), `report did not mask ${name}`);
+  for (const name of ["token", "Token", "access_token", "auth", "sig", "key", "secret"]) {
+    assert.equal(report.includes(`${name}:`), false, `report exposed parameter name ${name}`);
+  }
+  assert.ok(report.includes("sid: [MASKED]"));
+  assert.ok(report.includes("[REDACTED_PARAMETER]: [MASKED]"));
+});
+
+test("redacts unknown parameter names in regular, repeated, and URL-encoded query fields", () => {
+  const cases = [
+    {
+      name: "synthetic-parameter-name-secret",
+      query: "synthetic-parameter-name-secret=synthetic-value"
+    },
+    {
+      name: "synthetic-repeated-name-secret",
+      query: "synthetic-repeated-name-secret=first&synthetic-repeated-name-secret=second",
+      repeated: true
+    },
+    {
+      name: "synthetic-encoded-name-secret",
+      query: "%73ynthetic%2Dencoded%2Dname%2Dsecret=synthetic-value"
+    }
+  ];
+
+  for (const { name, query, repeated } of cases) {
+    const report = createVlessDiagnostic(server(
+      `vless://${uuid}@private-server.example:443?${query}`
+    ));
+
+    assert.equal(report.includes(name), false, `report exposed parameter name ${name}`);
+    assert.ok(report.includes("[REDACTED_PARAMETER]"));
+    if (repeated) {
+      assert.match(report, /Query parameter "\[REDACTED_PARAMETER\]" is repeated/);
+    }
   }
 });
 

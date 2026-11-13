@@ -10,6 +10,7 @@ const PARAMETER_NAMES = [
   "encryption", "security", "type", "flow", "mode", "headerType", "host", "path", "serviceName",
   "spiderX", "sni", "serverName", "fp", "alpn", "pbk", "publicKey", "sid", "shortId"
 ];
+const SAFE_PARAMETER_NAMES = new Set(PARAMETER_NAMES);
 const SUPPORTED_PARAMETERS = new Set([
   "encryption", "security", "type", "flow", "headerType", "host", "path", "serviceName",
   "spiderX", "sni", "serverName", "fp", "alpn", "pbk", "publicKey", "sid", "shortId"
@@ -34,8 +35,7 @@ function clean(value, maxLength = 256) {
 }
 
 function safeParameterName(value) {
-  const name = clean(value, 80);
-  return /^[A-Za-z0-9_.-]+$/.test(name) ? name : "[UNSAFE NAME]";
+  return SAFE_PARAMETER_NAMES.has(value) ? value : "[REDACTED_PARAMETER]";
 }
 
 function displayValue(name, value) {
