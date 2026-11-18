@@ -21,10 +21,13 @@ import (
 const maximumLogBytes int64 = 2 * 1024 * 1024
 
 type ManagerPaths struct {
-	SingBoxExecutable string
-	ConfigFile        string
-	LogFile           string
-	ProxyStateFile    string
+	SingBoxExecutable    string
+	XrayExecutable       string
+	XrayStagingDirectory string
+	ConfigFile           string
+	LogFile              string
+	XrayLogFile          string
+	ProxyStateFile       string
 }
 
 type CoreStatus struct {
@@ -54,29 +57,41 @@ func (status CoreStatus) AsError() error {
 }
 
 type CoreManager struct {
-	mu              sync.Mutex
-	paths           ManagerPaths
-	state           string
-	lastError       string
-	errorCode       string
-	command         *exec.Cmd
-	done            chan struct{}
-	logFile         *os.File
-	logger          *boundedLogWriter
-	logWriters      []*prefixedLogWriter
-	lastServer      *ServerInput
-	proxyPort       uint16
-	externalIP      string
-	commandArgs     []string
-	commandEnv      []string
-	validateConfig  func(string, []string, *boundedLogWriter) error
-	proxyReady      func(uint16) bool
-	checkProxy      func(uint16) (string, error)
-	proxyController ProxyController
+	mu                  sync.Mutex
+	startMu             sync.Mutex
+	paths               ManagerPaths
+	state               string
+	lastError           string
+	errorCode           string
+	command             *exec.Cmd
+	activeCore          CoreKind
+	done                chan struct{}
+	logFile             *os.File
+	logger              *boundedLogWriter
+	logWriters          []*prefixedLogWriter
+	lastServer          *ServerInput
+	stagedXrayDirectory string
+	proxyPort           uint16
+	externalIP          string
+	commandArgs         []string
+	commandEnv          []string
+	verifyXray          func(string) error
+	validateConfig      func(string, []string, *boundedLogWriter) error
+	validateXray        func(string, []string, *boundedLogWriter) error
+	proxyReady          func(uint16) bool
+	checkProxy          func(uint16) (string, error)
+	proxyController     ProxyController
 }
 
 func NewCoreManager(paths ManagerPaths) *CoreManager {
-	return &CoreManager{paths: paths, state: "stopped"}
+	return newCoreManager(paths, verifyXrayBinary)
+}
+
+func newCoreManager(paths ManagerPaths, verifyXray func(string) error) *CoreManager {
+	if verifyXray == nil {
+		verifyXray = verifyXrayBinary
+	}
+	return &CoreManager{paths: paths, state: "stopped", verifyXray: verifyXray}
 }
 
 func (manager *CoreManager) SetProxyController(controller ProxyController) {
@@ -95,7 +110,114 @@ func (manager *CoreManager) RecoverProxySettings() error {
 	return controller.Recover()
 }
 
+func (manager *CoreManager) executableForCore(core CoreKind) string {
+	switch core {
+	case CoreSingBox:
+		return manager.paths.SingBoxExecutable
+	case CoreXray:
+		return manager.paths.XrayExecutable
+	default:
+		return ""
+	}
+}
+
+func (manager *CoreManager) logFileForCore(core CoreKind) string {
+	if core == CoreXray && manager.paths.XrayLogFile != "" {
+		return manager.paths.XrayLogFile
+	}
+	return manager.paths.LogFile
+}
+
+func (manager *CoreManager) generateCoreConfig(
+	core CoreKind, server ServerInput, profile VLESSProfile, proxyPort uint16,
+) ([]byte, []string, error) {
+	switch core {
+	case CoreSingBox:
+		return GenerateRuntimeConfig(server, proxyPort)
+	case CoreXray:
+		config, secrets, err := (XrayAdapter{}).GenerateConfig(profile, proxyPort)
+		if err != nil {
+			return nil, nil, err
+		}
+		secrets = append(secrets, server.URI, url.QueryEscape(server.URI))
+		if parsed, parseErr := url.Parse(server.URI); parseErr == nil {
+			if query, queryErr := url.ParseQuery(parsed.RawQuery); queryErr == nil {
+				for _, values := range query {
+					for _, value := range values {
+						secrets = append(secrets, value, url.QueryEscape(value))
+					}
+				}
+			}
+		}
+		return config, uniqueStrings(secrets), nil
+	default:
+		return nil, nil, ErrUnsupportedVLESSProfile
+	}
+}
+
+func (manager *CoreManager) validateForCore(core CoreKind, secrets []string, logger *boundedLogWriter) error {
+	switch core {
+	case CoreSingBox:
+		if manager.validateConfig != nil {
+			return manager.validateConfig(manager.paths.ConfigFile, secrets, logger)
+		}
+	case CoreXray:
+		if manager.validateXray != nil {
+			return manager.validateXray(manager.paths.ConfigFile, secrets, logger)
+		}
+	}
+	return nil
+}
+
+func (manager *CoreManager) startFailure(code string, err error) CoreStatus {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if manager.command == nil {
+		return manager.setErrorLocked(code, err)
+	}
+	return ErrorStatus(err)
+}
+
 func (manager *CoreManager) Start(server ServerInput) CoreStatus {
+	manager.startMu.Lock()
+	defer manager.startMu.Unlock()
+	return manager.start(server)
+}
+
+func (manager *CoreManager) start(server ServerInput) CoreStatus {
+	profile, err := ParseVLESSProfile(server)
+	if err != nil {
+		return manager.startFailure("CONFIG_INVALID", err)
+	}
+	coreKind, err := (CoreSelector{}).Select(profile)
+	if err != nil {
+		return manager.startFailure("UNSUPPORTED_PROTOCOL", err)
+	}
+	executablePath := manager.executableForCore(coreKind)
+
+	manager.mu.Lock()
+	if manager.command != nil && manager.activeCore == coreKind {
+		status := manager.statusLocked()
+		manager.mu.Unlock()
+		return status
+	}
+	hasRunningCore := manager.command != nil
+	manager.mu.Unlock()
+	if hasRunningCore {
+		status := manager.stop()
+		if status.State == "error" || status.Running {
+			return status
+		}
+	}
+
+	info, err := os.Stat(executablePath)
+	if err != nil || !info.Mode().IsRegular() {
+		message := "VPN core not found. Install sing-box in core/bin."
+		if coreKind == CoreXray {
+			message = "Xray core not found. Repair Choobs or install the verified Xray 24.11.30 binary."
+		}
+		return manager.startFailure("CORE_NOT_FOUND", errors.New(message))
+	}
 	manager.mu.Lock()
 	if manager.command != nil {
 		status := manager.statusLocked()
@@ -113,22 +235,17 @@ func (manager *CoreManager) Start(server ServerInput) CoreStatus {
 	manager.proxyPort = 0
 	manager.externalIP = ""
 
-	info, err := os.Stat(manager.paths.SingBoxExecutable)
-	if err != nil || !info.Mode().IsRegular() {
-		status := manager.setErrorLocked("CORE_NOT_FOUND", errors.New("VPN core not found. Install sing-box in core/bin."))
-		manager.mu.Unlock()
-		return status
-	}
 	proxyPort, err := chooseProxyPort()
 	if err != nil {
 		status := manager.setErrorLocked("PROXY_NOT_READY", errors.New("Could not reserve a local proxy port."))
 		manager.mu.Unlock()
 		return status
 	}
-	config, secrets, err := GenerateRuntimeConfig(server, proxyPort)
+	config, secrets, err := manager.generateCoreConfig(coreKind, server, profile, proxyPort)
 	if err != nil {
 		code := "CONFIG_INVALID"
-		if server.Protocol != "VLESS" || strings.Contains(err.Error(), "not supported") ||
+		if errors.Is(err, ErrXrayConfigUnsupported) || errors.Is(err, ErrUnsupportedVLESSProfile) ||
+			strings.Contains(err.Error(), "not supported") ||
 			strings.Contains(err.Error(), "not implemented") {
 			code = "UNSUPPORTED_PROTOCOL"
 		}
@@ -142,7 +259,7 @@ func (manager *CoreManager) Start(server ServerInput) CoreStatus {
 		return status
 	}
 
-	logFile, remainingLogBytes, err := openCoreLog(manager.paths.LogFile)
+	logFile, remainingLogBytes, err := openCoreLog(manager.logFileForCore(coreKind))
 	if err != nil {
 		_ = os.Remove(manager.paths.ConfigFile)
 		status := manager.setErrorLocked("CORE_START_FAILED", errors.New("Could not open the VPN core log."))
@@ -151,31 +268,62 @@ func (manager *CoreManager) Start(server ServerInput) CoreStatus {
 	}
 	logger := &boundedLogWriter{file: logFile, remaining: remainingLogBytes, secrets: secrets}
 	manager.logger = logger
-	_, _ = io.WriteString(logger, "[CORE] Starting sing-box\n")
+	coreName := coreDisplayName(coreKind)
+	_, _ = io.WriteString(logger, "[CORE] Starting "+coreName+"\n")
 
-	args := manager.commandArgs
-	if args == nil {
-		if err := validateSingBoxConfig(manager.paths.SingBoxExecutable, manager.paths.ConfigFile, logger); err != nil {
-			_ = logger.Flush()
-			_ = logFile.Close()
-			_ = os.Remove(manager.paths.ConfigFile)
-			status := manager.setErrorLocked("CONFIG_INVALID", errors.New("Invalid sing-box configuration."))
-			manager.mu.Unlock()
-			return status
+	launchPath := executablePath
+	stagedXrayDirectory := ""
+	if coreKind == CoreXray {
+		stagingRoot := manager.paths.XrayStagingDirectory
+		if stagingRoot == "" {
+			stagingRoot = filepath.Join(filepath.Dir(manager.paths.ConfigFile), "xray-staging")
 		}
-		args = []string{"run", "-c", manager.paths.ConfigFile}
-	} else if manager.validateConfig != nil {
-		if err := manager.validateConfig(manager.paths.ConfigFile, secrets, logger); err != nil {
+		var stageErr error
+		launchPath, stagedXrayDirectory, stageErr = stageVerifiedXrayBinary(
+			executablePath,
+			stagingRoot,
+			manager.verifyXray,
+		)
+		if stageErr != nil {
 			_ = logger.Flush()
 			_ = logFile.Close()
 			_ = os.Remove(manager.paths.ConfigFile)
-			status := manager.setErrorLocked("CONFIG_INVALID", errors.New("Invalid sing-box configuration."))
+			status := manager.setErrorLocked(
+				"CORE_INTEGRITY_FAILED",
+				errors.New("Xray core failed its integrity check. Repair or reinstall Choobs."),
+			)
 			manager.mu.Unlock()
 			return status
 		}
 	}
 
-	command := exec.Command(manager.paths.SingBoxExecutable, args...)
+	args := manager.commandArgs
+	if args == nil {
+		if err := validateCoreConfig(coreKind, launchPath, manager.paths.ConfigFile, logger); err != nil {
+			if stagedXrayDirectory != "" {
+				_ = os.RemoveAll(stagedXrayDirectory)
+			}
+			_ = logger.Flush()
+			_ = logFile.Close()
+			_ = os.Remove(manager.paths.ConfigFile)
+			status := manager.setErrorLocked("CONFIG_INVALID", fmt.Errorf("Invalid %s configuration.", coreName))
+			manager.mu.Unlock()
+			return status
+		}
+		args = coreRunArguments(coreKind, manager.paths.ConfigFile)
+	} else if err := manager.validateForCore(coreKind, secrets, logger); err != nil {
+		if stagedXrayDirectory != "" {
+			_ = os.RemoveAll(stagedXrayDirectory)
+		}
+		_ = logger.Flush()
+		_ = logFile.Close()
+		_ = os.Remove(manager.paths.ConfigFile)
+		status := manager.setErrorLocked("CONFIG_INVALID", fmt.Errorf("Invalid %s configuration.", coreName))
+		manager.mu.Unlock()
+		return status
+	}
+
+	command := exec.Command(launchPath, args...)
 	if manager.commandEnv != nil {
 		command.Env = manager.commandEnv
 	}
@@ -184,6 +332,9 @@ func (manager *CoreManager) Start(server ServerInput) CoreStatus {
 	command.Stdout = stdoutLog
 	command.Stderr = stderrLog
 	if err := command.Start(); err != nil {
+		if stagedXrayDirectory != "" {
+			_ = os.RemoveAll(stagedXrayDirectory)
+		}
 		_ = logger.Flush()
 		_ = logFile.Close()
 		_ = os.Remove(manager.paths.ConfigFile)
@@ -193,6 +344,8 @@ func (manager *CoreManager) Start(server ServerInput) CoreStatus {
 	}
 
 	manager.command = command
+	manager.activeCore = coreKind
+	manager.stagedXrayDirectory = stagedXrayDirectory
 	manager.done = make(chan struct{})
 	manager.logFile = logFile
 	manager.logWriters = []*prefixedLogWriter{stdoutLog, stderrLog}
@@ -204,7 +357,7 @@ func (manager *CoreManager) Start(server ServerInput) CoreStatus {
 	manager.mu.Unlock()
 
 	if logger != nil {
-		_, _ = io.WriteString(logger, "[CORE] sing-box started\n")
+		_, _ = io.WriteString(logger, "[CORE] "+coreName+" started\n")
 	}
 	if err := waitForProxy(proxyPort, done, manager.proxyReady); err != nil {
 		return manager.failAndStop(command, "PROXY_NOT_READY", errors.New("Local proxy did not start."))
@@ -252,6 +405,12 @@ func (manager *CoreManager) Start(server ServerInput) CoreStatus {
 }
 
 func (manager *CoreManager) Stop() CoreStatus {
+	manager.startMu.Lock()
+	defer manager.startMu.Unlock()
+	return manager.stop()
+}
+
+func (manager *CoreManager) stop() CoreStatus {
 	manager.mu.Lock()
 	if manager.command == nil {
 		controller := manager.proxyController
@@ -273,6 +432,7 @@ func (manager *CoreManager) Stop() CoreStatus {
 		manager.errorCode = ""
 		manager.proxyPort = 0
 		manager.externalIP = ""
+		manager.activeCore = ""
 		if err := os.Remove(manager.paths.ConfigFile); err != nil && !os.IsNotExist(err) {
 			manager.state = "error"
 			manager.errorCode = "STOP_FAILED"
@@ -315,7 +475,7 @@ func (manager *CoreManager) Stop() CoreStatus {
 		return status
 	}
 	if manager.logger != nil {
-		_, _ = io.WriteString(manager.logger, "[CORE] Stopping sing-box\n")
+		_, _ = io.WriteString(manager.logger, "[CORE] Stopping "+coreDisplayName(manager.activeCore)+"\n")
 	}
 	if err := command.Process.Kill(); err != nil {
 		manager.mu.Unlock()
@@ -353,6 +513,7 @@ func (manager *CoreManager) Stop() CoreStatus {
 	manager.mu.Lock()
 	manager.proxyPort = 0
 	manager.externalIP = ""
+	manager.activeCore = ""
 	manager.lastError = ""
 	manager.errorCode = ""
 	status := manager.statusLocked()
@@ -374,6 +535,9 @@ func (manager *CoreManager) stopError(message string) CoreStatus {
 }
 
 func (manager *CoreManager) Restart(server *ServerInput) CoreStatus {
+	manager.startMu.Lock()
+	defer manager.startMu.Unlock()
+
 	manager.mu.Lock()
 	var selected *ServerInput
 	if server != nil {
@@ -387,10 +551,10 @@ func (manager *CoreManager) Restart(server *ServerInput) CoreStatus {
 	if selected == nil {
 		return ErrorStatus(errors.New("Reconnect requires a selected server."))
 	}
-	if status := manager.Stop(); status.State == "error" {
+	if status := manager.stop(); status.State == "error" {
 		return status
 	}
-	return manager.Start(*selected)
+	return manager.start(*selected)
 }
 
 func (manager *CoreManager) Status() CoreStatus {
@@ -431,6 +595,7 @@ func (manager *CoreManager) setErrorLocked(code string, err error) CoreStatus {
 	manager.lastError = err.Error()
 	manager.errorCode = code
 	manager.command = nil
+	manager.activeCore = ""
 	manager.done = nil
 	manager.logger = nil
 	return manager.statusLocked()
@@ -471,7 +636,7 @@ func (manager *CoreManager) failAndStop(command *exec.Cmd, code string, failure 
 		return status
 	}
 	if manager.logger != nil {
-		_, _ = io.WriteString(manager.logger, "[CORE] Stopping sing-box\n")
+		_, _ = io.WriteString(manager.logger, "[CORE] Stopping "+coreDisplayName(manager.activeCore)+"\n")
 	}
 	manager.mu.Unlock()
 	_ = command.Process.Kill()
@@ -510,6 +675,10 @@ func (manager *CoreManager) wait(command *exec.Cmd, done chan struct{}, logFile 
 	logger := manager.logger
 	logWriters := append([]*prefixedLogWriter(nil), manager.logWriters...)
 	controller := manager.proxyController
+	stagedXrayDirectory := ""
+	if manager.command == command {
+		stagedXrayDirectory = manager.stagedXrayDirectory
+	}
 	manager.mu.Unlock()
 	restoreErr := error(nil)
 	if controller != nil {
@@ -519,6 +688,13 @@ func (manager *CoreManager) wait(command *exec.Cmd, done chan struct{}, logFile 
 		_, _ = io.WriteString(logger, "[SYSTEM] Restoring previous proxy state\n")
 		if restoreErr == nil {
 			_, _ = io.WriteString(logger, "[VPN] Disconnected\n")
+		}
+	}
+	stagingCleanupErr := error(nil)
+	if stagedXrayDirectory != "" {
+		stagingCleanupErr = os.RemoveAll(stagedXrayDirectory)
+		if stagingCleanupErr != nil && logger != nil {
+			_, _ = io.WriteString(logger, "[CORE] Could not remove the staged Xray executable\n")
 		}
 	}
 	for _, writer := range logWriters {
@@ -537,6 +713,10 @@ func (manager *CoreManager) wait(command *exec.Cmd, done chan struct{}, logFile 
 			manager.state = "error"
 			manager.errorCode = "PROXY_RESTORE_FAILED"
 			manager.lastError = "VPN core exited and previous Windows proxy settings could not be restored."
+		case stagingCleanupErr != nil:
+			manager.state = "error"
+			manager.errorCode = "CORE_CLEANUP_FAILED"
+			manager.lastError = "Could not remove the temporary Xray runtime."
 		case manager.state == "stopping":
 			manager.state = "stopped"
 			manager.lastError = ""
@@ -553,6 +733,8 @@ func (manager *CoreManager) wait(command *exec.Cmd, done chan struct{}, logFile 
 			}
 		}
 		manager.command = nil
+		manager.activeCore = ""
+		manager.stagedXrayDirectory = ""
 		manager.done = nil
 		manager.logFile = nil
 		manager.logger = nil
@@ -588,6 +770,60 @@ func validateSingBoxConfig(executablePath, configPath string, output *boundedLog
 	_ = stderrLog.Flush()
 	if err != nil {
 		return errors.New("sing-box config validation failed")
+	}
+	return nil
+}
+
+func coreDisplayName(core CoreKind) string {
+	switch core {
+	case CoreSingBox:
+		return "sing-box"
+	case CoreXray:
+		return "Xray"
+	default:
+		return "VPN"
+	}
+}
+
+func coreRunArguments(core CoreKind, configPath string) []string {
+	switch core {
+	case CoreSingBox:
+		return []string{"run", "-c", configPath}
+	case CoreXray:
+		return []string{"run", "-config", configPath}
+	default:
+		return nil
+	}
+}
+
+func coreValidationCommand(core CoreKind, executablePath, configPath string) (*exec.Cmd, error) {
+	switch core {
+	case CoreSingBox:
+		return exec.Command(executablePath, "check", "-c", configPath), nil
+	case CoreXray:
+		return exec.Command(executablePath, "run", "-test", "-config", configPath), nil
+	default:
+		return nil, ErrUnsupportedVLESSProfile
+	}
+}
+
+func validateCoreConfig(core CoreKind, executablePath, configPath string, output *boundedLogWriter) error {
+	if core == CoreSingBox {
+		return validateSingBoxConfig(executablePath, configPath, output)
+	}
+	command, err := coreValidationCommand(core, executablePath, configPath)
+	if err != nil {
+		return err
+	}
+	stdoutLog := &prefixedLogWriter{writer: output, prefix: "[check stdout] "}
+	stderrLog := &prefixedLogWriter{writer: output, prefix: "[check stderr] "}
+	command.Stdout = stdoutLog
+	command.Stderr = stderrLog
+	err = command.Run()
+	_ = stdoutLog.Flush()
+	_ = stderrLog.Flush()
+	if err != nil {
+		return errors.New("Xray config validation failed")
 	}
 	return nil
 }

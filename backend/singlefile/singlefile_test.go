@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -17,6 +18,7 @@ func createTestRuntime(t *testing.T, root string) {
 		"resources/app.asar": "synthetic electron app",
 		"resources/backend/choobs-core-manager.exe": "synthetic core manager",
 		"resources/core/bin/sing-box.exe":           "synthetic sing-box",
+		"resources/core/bin/xray.exe":               "synthetic xray",
 	}
 	for name, content := range files {
 		filePath := filepath.Join(root, filepath.FromSlash(name))
@@ -27,6 +29,11 @@ func createTestRuntime(t *testing.T, root string) {
 			t.Fatal(err)
 		}
 	}
+}
+
+func testXraySHA256() string {
+	hash := sha256.Sum256([]byte("synthetic xray"))
+	return hex.EncodeToString(hash[:])
 }
 
 func openArchive(t *testing.T, archivePath string) *zip.Reader {
@@ -62,11 +69,11 @@ func TestPayloadArchiveExtractsAndReusesVerifiedRuntime(t *testing.T) {
 	archive := openArchive(t, archivePath)
 	userDirectory := filepath.Join(root, "user")
 
-	first, err := EnsureRuntime(archive, hash, "0.1.0", userDirectory)
+	first, err := EnsureRuntime(archive, hash, testXraySHA256(), "0.1.0", userDirectory)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := EnsureRuntime(archive, hash, "0.1.0", userDirectory)
+	second, err := EnsureRuntime(archive, hash, testXraySHA256(), "0.1.0", userDirectory)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,14 +99,14 @@ func TestDamagedRuntimeIsReplacedWithVerifiedFiles(t *testing.T) {
 	}
 	archive := openArchive(t, archivePath)
 	userDirectory := filepath.Join(root, "user")
-	runtimePath, err := EnsureRuntime(archive, hash, "0.1.0", userDirectory)
+	runtimePath, err := EnsureRuntime(archive, hash, testXraySHA256(), "0.1.0", userDirectory)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(runtimePath, "Choobs.exe"), []byte("damaged"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	repaired, err := EnsureRuntime(archive, hash, "0.1.0", userDirectory)
+	repaired, err := EnsureRuntime(archive, hash, testXraySHA256(), "0.1.0", userDirectory)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,11 +137,50 @@ func TestExecutablePayloadFooterAndIntegrity(t *testing.T) {
 	}
 	singBoxHash := sha256.Sum256([]byte("synthetic sing-box"))
 	expectedSingBoxHash := hex.EncodeToString(singBoxHash[:])
-	if err := VerifyExecutable(executable, hash, expectedSingBoxHash); err != nil {
+	if err := VerifyExecutable(executable, hash, expectedSingBoxHash, testXraySHA256()); err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifyExecutable(executable, "0000000000000000", expectedSingBoxHash); err == nil {
+	if err := VerifyExecutable(executable, "0000000000000000", expectedSingBoxHash, testXraySHA256()); err == nil {
 		t.Fatal("expected payload hash mismatch")
+	}
+	if err := VerifyExecutable(executable, hash, expectedSingBoxHash, strings.Repeat("0", 64)); err == nil {
+		t.Fatal("expected incorrect Xray checksum to be rejected")
+	}
+}
+
+func TestRuntimeRejectsPayloadWithUnexpectedXrayChecksum(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	if err := os.MkdirAll(source, 0700); err != nil {
+		t.Fatal(err)
+	}
+	createTestRuntime(t, source)
+	archivePath := filepath.Join(root, "payload.zip")
+	_, err := CreatePayload(source, archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := VerifyArchiveFile(archivePath, testXraySHA256()); err != nil {
+		t.Fatalf("valid portable payload failed Xray checksum verification: %v", err)
+	}
+	if err := VerifyArchiveFile(archivePath, strings.Repeat("0", 64)); err == nil {
+		t.Fatal("expected archive with unexpected Xray checksum to be rejected")
+	}
+	if _, err := EnsureRuntime(openArchive(t, archivePath), strings.Repeat("a", 64), strings.Repeat("0", 64), "0.1.0", filepath.Join(root, "user")); err == nil {
+		t.Fatal("expected runtime extraction with unexpected Xray checksum to be rejected")
+	}
+}
+
+func TestRuntimeArchiveRequiresXrayExecutable(t *testing.T) {
+	manifest := Manifest{Files: map[string]string{
+		"Choobs.exe":         "a",
+		"resources/app.asar": "b",
+		"resources/backend/choobs-core-manager.exe": "c",
+		"resources/core/bin/sing-box.exe":           "d",
+	}}
+	if err := verifyRequiredFiles(manifest); err == nil {
+		t.Fatal("expected required Xray executable to be enforced")
 	}
 }
 

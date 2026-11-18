@@ -1,0 +1,121 @@
+name: Windows builds
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.12.0
+          cache: npm
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.20.14
+          cache: false
+
+      - name: Install locked Node.js dependencies
+        run: npm ci
+
+      - name: Download and verify pinned VPN cores
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $manifest = Get-Content backend/core-hashes.json -Raw | ConvertFrom-Json
+          $singBoxVersion = $manifest.'sing-box'.version
+          $xrayVersion = $manifest.xray.version
+
+          if ($singBoxVersion -ne "1.10.7" -or $xrayVersion -ne "24.11.30") {
+            throw "Core versions differ from the versions approved for this workflow."
+          }
+          if ($manifest.xray.releaseUrl -ne "https://github.com/XTLS/Xray-core/releases/download/v24.11.30/Xray-win7-64.zip") {
+            throw "Xray manifest does not point to the official pinned Win7 x64 release."
+          }
+
+          $singBoxArchive = Join-Path $env:RUNNER_TEMP "sing-box-$singBoxVersion-windows-amd64-legacy.zip"
+          $singBoxExtract = Join-Path $env:RUNNER_TEMP "sing-box-extract"
+          $singBoxUrl = "https://github.com/SagerNet/sing-box/releases/download/v$singBoxVersion/sing-box-$singBoxVersion-windows-amd64-legacy.zip"
+          Invoke-WebRequest -Uri $singBoxUrl -OutFile $singBoxArchive
+          Expand-Archive -LiteralPath $singBoxArchive -DestinationPath $singBoxExtract
+          $singBoxExecutable = Get-ChildItem -LiteralPath $singBoxExtract -Filter "sing-box.exe" -File -Recurse | Select-Object -First 1
+          if (-not $singBoxExecutable) {
+            throw "The pinned sing-box release archive does not contain sing-box.exe."
+          }
+          Copy-Item -LiteralPath $singBoxExecutable.FullName -Destination "core/bin/sing-box.exe" -Force
+
+          $xrayArchive = Join-Path $env:RUNNER_TEMP "Xray-win7-64.zip"
+          $xrayExtract = Join-Path $env:RUNNER_TEMP "xray-extract"
+          $xrayChecksumPath = "$($manifest.xray.releaseUrl).dgst"
+          $xrayChecksumFile = Join-Path $env:RUNNER_TEMP "Xray-win7-64.zip.dgst"
+          Invoke-WebRequest -Uri $manifest.xray.releaseUrl -OutFile $xrayArchive
+          Invoke-WebRequest -Uri $xrayChecksumPath -OutFile $xrayChecksumFile
+          $checksumText = Get-Content $xrayChecksumFile -Raw
+          if ($checksumText -notmatch '(?im)^\s*SHA2-256\(Xray-win7-64\.zip\)\s*=\s*([a-f0-9]{64})\s*$') {
+            throw "The official Xray release checksum file has an invalid format."
+          }
+          $archiveHash = (Get-FileHash -LiteralPath $xrayArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($archiveHash -ne $Matches[1].ToLowerInvariant()) {
+            throw "The Xray archive does not match the official release checksum."
+          }
+          Expand-Archive -LiteralPath $xrayArchive -DestinationPath $xrayExtract
+          $xrayExecutable = Get-ChildItem -LiteralPath $xrayExtract -Filter "xray.exe" -File -Recurse | Select-Object -First 1
+          if (-not $xrayExecutable) {
+            throw "The pinned Xray release archive does not contain xray.exe."
+          }
+          Copy-Item -LiteralPath $xrayExecutable.FullName -Destination "core/bin/xray.exe" -Force
+
+          foreach ($core in @(
+            @{ Path = "core/bin/sing-box.exe"; Expected = $manifest.'sing-box'.sha256 },
+            @{ Path = "core/bin/xray.exe"; Expected = $manifest.xray.sha256 }
+          )) {
+            if (-not (Test-Path -LiteralPath $core.Path -PathType Leaf)) {
+              throw "Required core is missing: $($core.Path)"
+            }
+            $actualHash = (Get-FileHash -LiteralPath $core.Path -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualHash -ne $core.Expected.ToLowerInvariant()) {
+              throw "SHA-256 mismatch for $($core.Path)."
+            }
+          }
+          if (-not (Test-Path -LiteralPath "backend/core-hashes.json" -PathType Leaf)) {
+            throw "Required core hash manifest is missing."
+          }
+
+      - name: Run Go tests
+        run: go test ./...
+        working-directory: backend
+
+      - name: Run Node.js tests
+        run: node --test
+
+      - name: Build Installer
+        run: npm run build:win
+
+      - name: Upload Installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Choobs-Installer-${{ github.sha }}
+          path: dist/Choobs-*-Setup.exe
+          if-no-files-found: error
+
+      - name: Build Portable
+        run: npm run build:portable
+
+      - name: Upload Portable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Choobs-Portable-${{ github.sha }}
+          path: dist/Choobs.exe
+          if-no-files-found: error

@@ -61,7 +61,7 @@ func (controller *fakeProxyController) Recover() error {
 }
 
 func newTestCoreManager(paths ManagerPaths) *CoreManager {
-	manager := NewCoreManager(paths)
+	manager := newCoreManager(paths, func(string) error { return nil })
 	manager.SetProxyController(&fakeProxyController{})
 	return manager
 }
@@ -74,6 +74,23 @@ func testServer() ServerInput {
 		Port:     443,
 		URI:      testVLESSURI,
 	}
+}
+
+func testXrayServer(transport string) ServerInput {
+	server := testServer()
+	switch transport {
+	case "xhttp":
+		server.URI = "vless://123e4567-e89b-12d3-a456-426614174000@example.com:443" +
+			"?type=xhttp&security=tls&sni=front.example&mode=stream-one&host=cdn.example&path=%2Fconnect"
+	case "grpc":
+		server.URI = "vless://123e4567-e89b-12d3-a456-426614174000@example.com:443" +
+			"?type=grpc&security=tls&sni=front.example&serviceName=Tunnel&authority=grpc.example&mode=multi"
+	case "xhttp-reality":
+		server.URI = "vless://123e4567-e89b-12d3-a456-426614174000@example.com:443" +
+			"?type=xhttp&security=reality&sni=front.example&mode=auto&fp=chrome&pbk=" +
+			xraySyntheticPublicKey + "&sid=deadbeef"
+	}
+	return server
 }
 
 func TestGenerateRuntimeConfigForBasicVLESS(t *testing.T) {
@@ -186,7 +203,7 @@ func TestGenerateRuntimeConfigRejectsUnknownParametersWithoutEchoingValues(t *te
 	if err == nil {
 		t.Fatal("expected unsupported VLESS parameter error")
 	}
-	if !strings.Contains(err.Error(), "Unsupported VLESS parameter: token") {
+	if !strings.Contains(err.Error(), "unsupported parameter") {
 		t.Fatalf("unexpected unsupported-parameter error: %v", err)
 	}
 	if strings.Contains(err.Error(), "secret-token") {
@@ -299,6 +316,9 @@ func TestCoreManagerLocalProxyListenerLifecycle(t *testing.T) {
 	if started.State != "running" || !started.Running || started.PID == nil || started.ProxyPort == 0 {
 		t.Fatalf("manager did not become running after listener became available: %#v", started)
 	}
+	if manager.activeCore != CoreSingBox {
+		t.Fatalf("ordinary VLESS TCP should use sing-box, got %q", manager.activeCore)
+	}
 	if proxyController.applyCount != 1 {
 		t.Fatalf("system proxy should be applied once after readiness, got %d", proxyController.applyCount)
 	}
@@ -397,6 +417,342 @@ func TestCoreManagerStartStopRestart(t *testing.T) {
 	}
 	if _, err := os.Stat(paths.ConfigFile); !os.IsNotExist(err) {
 		t.Fatalf("runtime config was not deleted after stop: %v", err)
+	}
+}
+
+func TestCoreManagerStartsXrayForXHTTPAndGRPC(t *testing.T) {
+	for _, transport := range []string{"xhttp", "grpc"} {
+		t.Run(transport, func(t *testing.T) {
+			root := t.TempDir()
+			paths := ManagerPaths{
+				SingBoxExecutable: filepath.Join(root, "missing-sing-box"),
+				XrayExecutable:    os.Args[0],
+				ConfigFile:        filepath.Join(root, "configs", "runtime.json"),
+				LogFile:           filepath.Join(root, "logs", "sing-box.log"),
+				XrayLogFile:       filepath.Join(root, "logs", "xray.log"),
+			}
+			manager := newTestCoreManager(paths)
+			manager.commandArgs = []string{"-test.run=TestCoreManagerHelperProcess"}
+			manager.commandEnv = append(os.Environ(),
+				"CHOOBS_CORE_MANAGER_HELPER=proxy",
+				"CHOOBS_CORE_HELPER_CONFIG="+paths.ConfigFile,
+			)
+			manager.checkProxy = func(uint16) (string, error) { return "203.0.113.1", nil }
+			validationCalled := false
+			manager.validateXray = func(configPath string, secrets []string, _ *boundedLogWriter) error {
+				validationCalled = true
+				contents, err := os.ReadFile(configPath)
+				if err != nil {
+					return err
+				}
+				var document struct {
+					Outbounds []struct {
+						StreamSettings struct {
+							Network string `json:"network"`
+						} `json:"streamSettings"`
+					} `json:"outbounds"`
+				}
+				if err := json.Unmarshal(contents, &document); err != nil {
+					return err
+				}
+				if len(document.Outbounds) == 0 || document.Outbounds[0].StreamSettings.Network != transport {
+					return errors.New("unexpected Xray transport in generated config")
+				}
+				if !containsString(secrets, "123e4567-e89b-12d3-a456-426614174000") {
+					return errors.New("Xray credentials were not registered for log redaction")
+				}
+				return nil
+			}
+
+			started := manager.Start(testXrayServer(transport))
+			if started.State != "running" || !started.Running || started.ProxyPort == 0 {
+				t.Fatalf("CoreManager failed to start Xray for %s: %#v", transport, started)
+			}
+			if !validationCalled || manager.activeCore != CoreXray {
+				t.Fatalf("Xray validation or selection was skipped: validation=%v core=%q", validationCalled, manager.activeCore)
+			}
+			stagedExecutable := manager.command.Path
+			if stagedExecutable == paths.XrayExecutable || filepath.Base(stagedExecutable) != "xray.exe" {
+				t.Fatalf("Xray was not launched from its verified staging copy: %q", stagedExecutable)
+			}
+			if _, err := os.Stat(stagedExecutable); err != nil {
+				t.Fatalf("verified Xray staging copy is unavailable while running: %v", err)
+			}
+			if _, err := os.Stat(paths.XrayLogFile); err != nil {
+				t.Fatalf("Xray-specific log was not opened: %v", err)
+			}
+			stopped := manager.Stop()
+			if stopped.State != "stopped" || stopped.Running {
+				t.Fatalf("CoreManager failed to stop Xray: %#v", stopped)
+			}
+			if _, err := os.Stat(stagedExecutable); !os.IsNotExist(err) {
+				t.Fatalf("Xray staging copy was not removed after stop: %v", err)
+			}
+			if manager.proxyController.(*fakeProxyController).restoreCount == 0 {
+				t.Fatal("System Proxy was not restored after Xray stopped")
+			}
+		})
+	}
+}
+
+func TestCoreManagerXrayValidationFailureDoesNotStartProcessAndRedactsSecrets(t *testing.T) {
+	root := t.TempDir()
+	paths := ManagerPaths{
+		XrayExecutable: os.Args[0],
+		ConfigFile:     filepath.Join(root, "runtime.json"),
+		LogFile:        filepath.Join(root, "sing-box.log"),
+		XrayLogFile:    filepath.Join(root, "xray.log"),
+	}
+	manager := newTestCoreManager(paths)
+	marker := filepath.Join(root, "process-started")
+	manager.commandArgs = []string{"-test.run=TestCoreManagerHelperProcess"}
+	manager.commandEnv = append(os.Environ(),
+		"CHOOBS_CORE_MANAGER_HELPER=wait",
+		"CHOOBS_CORE_HELPER_STARTED="+marker,
+	)
+	manager.validateXray = func(_ string, _ []string, output *boundedLogWriter) error {
+		_, _ = output.Write([]byte("Xray validation reported 123e4567-e89b-12d3-a456-426614174000\n"))
+		return errors.New("validation failed with synthetic secret")
+	}
+
+	status := manager.Start(testXrayServer("xhttp-reality"))
+	if status.State != "error" || status.Running || status.ErrorCode != "CONFIG_INVALID" {
+		t.Fatalf("unexpected Xray validation failure status: %#v", status)
+	}
+	if strings.Contains(status.Error, "123e4567-e89b-12d3-a456-426614174000") ||
+		strings.Contains(status.Error, "synthetic secret") {
+		t.Fatalf("validation error exposed sensitive data: %#v", status)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("Xray process started after failed validation: %v", err)
+	}
+	log, err := os.ReadFile(paths.XrayLogFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(log, []byte("123e4567-e89b-12d3-a456-426614174000")) ||
+		!bytes.Contains(log, []byte("[REDACTED]")) {
+		t.Fatalf("Xray validation log did not redact the UUID: %s", log)
+	}
+	assertEmptyXrayStagingDirectory(t, filepath.Join(root, "xray-staging"))
+}
+
+func TestCoreManagerXrayStartFailureDoesNotFallbackToSingBox(t *testing.T) {
+	root := t.TempDir()
+	xrayPath := filepath.Join(root, "xray")
+	if err := os.WriteFile(xrayPath, []byte("not an executable"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(root, "sing-box-started")
+	manager := newTestCoreManager(ManagerPaths{
+		SingBoxExecutable: os.Args[0],
+		XrayExecutable:    xrayPath,
+		ConfigFile:        filepath.Join(root, "runtime.json"),
+		LogFile:           filepath.Join(root, "sing-box.log"),
+		XrayLogFile:       filepath.Join(root, "xray.log"),
+	})
+	manager.commandArgs = []string{"-test.run=TestCoreManagerHelperProcess"}
+	manager.commandEnv = append(os.Environ(),
+		"CHOOBS_CORE_MANAGER_HELPER=wait",
+		"CHOOBS_CORE_HELPER_STARTED="+marker,
+	)
+
+	status := manager.Start(testXrayServer("xhttp"))
+	if status.State != "error" || status.Running || status.ErrorCode != "CORE_START_FAILED" {
+		t.Fatalf("unexpected Xray process-start failure status: %#v", status)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("sing-box fallback process was started: %v", err)
+	}
+	assertEmptyXrayStagingDirectory(t, filepath.Join(root, "xray-staging"))
+}
+
+func assertEmptyXrayStagingDirectory(t *testing.T, stagingRoot string) {
+	t.Helper()
+	entries, err := os.ReadDir(stagingRoot)
+	if err != nil {
+		t.Fatalf("could not read Xray staging directory: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("Xray staging data was not cleaned up: %#v", entries)
+	}
+}
+
+func TestCoreManagerRejectsIncompatibleProfileBeforeStartingCore(t *testing.T) {
+	root := t.TempDir()
+	marker := filepath.Join(root, "process-started")
+	manager := newTestCoreManager(ManagerPaths{
+		SingBoxExecutable: os.Args[0],
+		XrayExecutable:    os.Args[0],
+		ConfigFile:        filepath.Join(root, "runtime.json"),
+		LogFile:           filepath.Join(root, "sing-box.log"),
+		XrayLogFile:       filepath.Join(root, "xray.log"),
+	})
+	manager.commandArgs = []string{"-test.run=TestCoreManagerHelperProcess"}
+	manager.commandEnv = append(os.Environ(),
+		"CHOOBS_CORE_MANAGER_HELPER=wait",
+		"CHOOBS_CORE_HELPER_STARTED="+marker,
+	)
+	server := testXrayServer("xhttp")
+	server.URI = strings.Replace(server.URI, "security=tls", "security=none", 1)
+	server.URI = strings.Replace(server.URI, "&sni=front.example", "", 1)
+
+	status := manager.Start(server)
+	if status.State != "error" || status.Running || status.ErrorCode != "UNSUPPORTED_PROTOCOL" {
+		t.Fatalf("unexpected incompatible-profile status: %#v", status)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("core process started for an incompatible profile: %v", err)
+	}
+}
+
+func TestCoreManagerMissingXrayDoesNotFallbackToSingBox(t *testing.T) {
+	root := t.TempDir()
+	marker := filepath.Join(root, "sing-box-started")
+	manager := newTestCoreManager(ManagerPaths{
+		SingBoxExecutable: os.Args[0],
+		XrayExecutable:    filepath.Join(root, "missing-xray"),
+		ConfigFile:        filepath.Join(root, "runtime.json"),
+		LogFile:           filepath.Join(root, "sing-box.log"),
+	})
+	manager.commandArgs = []string{"-test.run=TestCoreManagerHelperProcess"}
+	manager.commandEnv = append(os.Environ(),
+		"CHOOBS_CORE_MANAGER_HELPER=wait",
+		"CHOOBS_CORE_HELPER_STARTED="+marker,
+	)
+
+	status := manager.Start(testXrayServer("xhttp"))
+	if status.State != "error" || status.Running || status.ErrorCode != "CORE_NOT_FOUND" ||
+		!strings.Contains(status.Error, "Xray core not found") {
+		t.Fatalf("unexpected missing-Xray status: %#v", status)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("sing-box fallback process was started when Xray was missing: %v", err)
+	}
+}
+
+func TestCoreManagerRejectsXrayWithUnexpectedChecksumBeforeValidationOrStart(t *testing.T) {
+	root := t.TempDir()
+	marker := filepath.Join(root, "xray-started")
+	manager := NewCoreManager(ManagerPaths{
+		SingBoxExecutable: os.Args[0],
+		XrayExecutable:    os.Args[0],
+		ConfigFile:        filepath.Join(root, "runtime.json"),
+		LogFile:           filepath.Join(root, "sing-box.log"),
+		XrayLogFile:       filepath.Join(root, "xray.log"),
+	})
+	manager.SetProxyController(&fakeProxyController{})
+	manager.commandArgs = []string{"-test.run=TestCoreManagerHelperProcess"}
+	manager.commandEnv = append(os.Environ(),
+		"CHOOBS_CORE_MANAGER_HELPER=wait",
+		"CHOOBS_CORE_HELPER_STARTED="+marker,
+	)
+	validated := false
+	manager.validateXray = func(string, []string, *boundedLogWriter) error {
+		validated = true
+		return nil
+	}
+
+	status := manager.Start(testXrayServer("xhttp"))
+	if status.State != "error" || status.Running || status.ErrorCode != "CORE_INTEGRITY_FAILED" {
+		t.Fatalf("unexpected Xray integrity failure status: %#v", status)
+	}
+	if validated {
+		t.Fatal("Xray config was validated before the executable passed integrity verification")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("Xray process started despite an unexpected checksum: %v", err)
+	}
+	if strings.Contains(status.Error, "123e4567-e89b-12d3-a456-426614174000") {
+		t.Fatalf("integrity error exposed the VLESS UUID: %q", status.Error)
+	}
+}
+
+func TestCoreManagerStopsSingBoxBeforeStartingXray(t *testing.T) {
+	root := t.TempDir()
+	paths := ManagerPaths{
+		SingBoxExecutable: os.Args[0],
+		XrayExecutable:    os.Args[0],
+		ConfigFile:        filepath.Join(root, "runtime.json"),
+		LogFile:           filepath.Join(root, "sing-box.log"),
+		XrayLogFile:       filepath.Join(root, "xray.log"),
+	}
+	manager := newTestCoreManager(paths)
+	manager.commandArgs = []string{"-test.run=TestCoreManagerHelperProcess"}
+	manager.commandEnv = append(os.Environ(),
+		"CHOOBS_CORE_MANAGER_HELPER=proxy",
+		"CHOOBS_CORE_HELPER_CONFIG="+paths.ConfigFile,
+	)
+	manager.checkProxy = func(uint16) (string, error) { return "203.0.113.1", nil }
+
+	singBoxStatus := manager.Start(testServer())
+	if singBoxStatus.State != "running" || manager.activeCore != CoreSingBox {
+		t.Fatalf("sing-box did not start before switch: %#v (core %q)", singBoxStatus, manager.activeCore)
+	}
+	oldPort := singBoxStatus.ProxyPort
+	oldPID := *singBoxStatus.PID
+	validationCalled := false
+	manager.validateXray = func(string, []string, *boundedLogWriter) error {
+		validationCalled = true
+		if err := waitForProxyShutdown(oldPort); err != nil {
+			return errors.New("sing-box listener is still active during Xray validation")
+		}
+		return nil
+	}
+
+	xrayStatus := manager.Start(testXrayServer("grpc"))
+	if xrayStatus.State != "running" || !xrayStatus.Running || manager.activeCore != CoreXray {
+		t.Fatalf("manager failed to switch from sing-box to Xray: %#v (core %q)", xrayStatus, manager.activeCore)
+	}
+	if !validationCalled {
+		t.Fatal("Xray config was not validated after stopping sing-box")
+	}
+	if *xrayStatus.PID == oldPID {
+		t.Fatal("core switch reused the prior process")
+	}
+	controller := manager.proxyController.(*fakeProxyController)
+	if controller.applyCount != 2 || controller.restoreCount == 0 {
+		t.Fatalf("System Proxy was not restored and reapplied during switch: apply=%d restore=%d", controller.applyCount, controller.restoreCount)
+	}
+	if err := waitForProxyShutdown(oldPort); err != nil {
+		t.Fatalf("previous core listener remained active after switch: %v", err)
+	}
+	if status := manager.Stop(); status.State != "stopped" || status.Running {
+		t.Fatalf("manager failed to stop Xray after switch: %#v", status)
+	}
+}
+
+func TestCoreValidationAndRunCommandsAreCoreSpecific(t *testing.T) {
+	tests := []struct {
+		core       CoreKind
+		validate   []string
+		run        []string
+		executable string
+	}{
+		{
+			core:       CoreSingBox,
+			validate:   []string{"sing-box", "check", "-c", "/data/runtime.json"},
+			run:        []string{"run", "-c", "/data/runtime.json"},
+			executable: "sing-box",
+		},
+		{
+			core:       CoreXray,
+			validate:   []string{"xray", "run", "-test", "-config", "/data/runtime.json"},
+			run:        []string{"run", "-config", "/data/runtime.json"},
+			executable: "xray",
+		},
+	}
+	for _, test := range tests {
+		command, err := coreValidationCommand(test.core, test.executable, "/data/runtime.json")
+		if err != nil {
+			t.Fatalf("%s validation command failed: %v", test.core, err)
+		}
+		if !equalStrings(command.Args, test.validate) {
+			t.Fatalf("unexpected %s validation command: %#v", test.core, command.Args)
+		}
+		if !equalStrings(coreRunArguments(test.core, "/data/runtime.json"), test.run) {
+			t.Fatalf("unexpected %s run command: %#v", test.core, coreRunArguments(test.core, "/data/runtime.json"))
+		}
 	}
 }
 
@@ -660,17 +1016,25 @@ func TestApplicationManagerPathsAreApplicationControlled(t *testing.T) {
 		t.Fatal(err)
 	}
 	executableName := "sing-box"
+	xrayExecutableName := "xray"
 	if runtime.GOOS == "windows" {
 		executableName += ".exe"
+		xrayExecutableName += ".exe"
 	}
 	if manager.paths.SingBoxExecutable != filepath.Join(root, "core", "bin", executableName) {
 		t.Fatalf("unexpected sing-box path: %s", manager.paths.SingBoxExecutable)
+	}
+	if manager.paths.XrayExecutable != filepath.Join(root, "core", "bin", xrayExecutableName) {
+		t.Fatalf("unexpected Xray path: %s", manager.paths.XrayExecutable)
 	}
 	if manager.paths.ConfigFile != filepath.Join(dataDirectory, "core", "configs", "runtime.json") {
 		t.Fatalf("unexpected runtime config path: %s", manager.paths.ConfigFile)
 	}
 	if manager.paths.LogFile != filepath.Join(dataDirectory, "core", "logs", "sing-box.log") {
 		t.Fatalf("unexpected log path: %s", manager.paths.LogFile)
+	}
+	if manager.paths.XrayLogFile != filepath.Join(dataDirectory, "core", "logs", "xray.log") {
+		t.Fatalf("unexpected Xray log path: %s", manager.paths.XrayLogFile)
 	}
 	if manager.paths.ProxyStateFile != filepath.Join(dataDirectory, "system-proxy-session.json") {
 		t.Fatalf("unexpected proxy recovery path: %s", manager.paths.ProxyStateFile)
@@ -685,6 +1049,11 @@ func TestCoreManagerHelperProcess(t *testing.T) {
 	mode := os.Getenv("CHOOBS_CORE_MANAGER_HELPER")
 	if mode == "" {
 		return
+	}
+	if marker := os.Getenv("CHOOBS_CORE_HELPER_STARTED"); marker != "" {
+		if err := os.WriteFile(marker, []byte("started"), 0600); err != nil {
+			os.Exit(1)
+		}
 	}
 	if secret := os.Getenv("CHOOBS_CORE_HELPER_SECRET"); secret != "" {
 		_, _ = os.Stdout.WriteString("helper output " + secret + "\n")
@@ -702,12 +1071,17 @@ func TestCoreManagerHelperProcess(t *testing.T) {
 			Inbounds []struct {
 				Listen     string `json:"listen"`
 				ListenPort uint16 `json:"listen_port"`
+				Port       uint16 `json:"port"`
 			} `json:"inbounds"`
 		}
 		if json.Unmarshal(configContents, &config) != nil || len(config.Inbounds) != 1 {
 			os.Exit(1)
 		}
-		listener, err := net.Listen("tcp", net.JoinHostPort(config.Inbounds[0].Listen, strconv.Itoa(int(config.Inbounds[0].ListenPort))))
+		port := config.Inbounds[0].ListenPort
+		if port == 0 {
+			port = config.Inbounds[0].Port
+		}
+		listener, err := net.Listen("tcp", net.JoinHostPort(config.Inbounds[0].Listen, strconv.Itoa(int(port))))
 		if err != nil {
 			os.Exit(1)
 		}
@@ -740,4 +1114,25 @@ func waitForState(t *testing.T, manager *CoreManager, state string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("manager did not reach state %q; got %#v", state, manager.Status())
+}
+
+func containsString(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }

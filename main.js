@@ -11,7 +11,6 @@ const zlib = require("zlib");
 const { ConfigStore, normalizeServer, normalizeSubscription } = require("./config-store");
 const { createVlessDiagnostic } = require("./app/js/vless-diagnostics");
 
-const iconDirectory = path.join(__dirname, "assets", "icons");
 const ownsSingleInstanceLock = app.requestSingleInstanceLock();
 let mainWindow;
 let configStore;
@@ -510,7 +509,7 @@ function updateTrayStatus(status) {
 
 function createTray() {
   if (process.platform !== "win32" || tray) return;
-  tray = new Tray(nativeImage.createFromPath(path.join(iconDirectory, "choobs-32.png")));
+  tray = new Tray(loadTrayIcon());
   tray.setToolTip("Choobs");
   tray.on("click", () => {
     if (!mainWindow || mainWindow.isDestroyed()) createWindow();
@@ -526,6 +525,20 @@ function shouldMinimizeToTray() {
     || Boolean(trayStatus.running || trayStatus.code === "PROXY_RESTORE_FAILED");
 }
 
+function getIconPath(filename) {
+  const assetRoot = app.isPackaged
+    ? path.join(process.resourcesPath, "app.asar.unpacked")
+    : __dirname;
+  return path.join(assetRoot, "assets", "icons", filename);
+}
+
+function loadTrayIcon() {
+  const iconPath = getIconPath("choobs-32.png");
+  const image = nativeImage.createFromPath(iconPath);
+  if (image.isEmpty()) throw new Error(`Could not load application icon: ${iconPath}`);
+  return image;
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1000,
@@ -533,10 +546,7 @@ function createWindow() {
     minWidth: 360,
     minHeight: 560,
     backgroundColor: "#111315",
-    icon: path.join(
-      iconDirectory,
-      process.platform === "win32" ? "choobs.ico" : "choobs-256.png"
-    ),
+    icon: getIconPath(process.platform === "win32" ? "choobs.ico" : "choobs-256.png"),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,

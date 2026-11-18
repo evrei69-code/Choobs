@@ -1,0 +1,12 @@
+{
+  "sing-box": {
+    "version": "1.10.7",
+    "sha256": "99fb67d576d13fcdb9bf938f393a6d2016da306b9eff853dbdbc75e2092443cc"
+  },
+  "xray": {
+    "version": "24.11.30",
+    "releaseUrl": "https://github.com/XTLS/Xray-core/releases/download/v24.11.30/Xray-win7-64.zip",
+    "archiveSha256": "ec1fb5790c556c6490a69354fe1d6f9056db1d068d4d565d2ef10fcbb882ddd2",
+    "sha256": "15dc41c5f4f634848deb4e54cf242451cb4de0e0a2fed4c0d0657ecaa2333c53"
+  }
+}

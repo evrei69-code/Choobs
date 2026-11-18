@@ -8,7 +8,10 @@ const backend = path.join(root, "backend");
 const go = process.platform === "win32" ? "go.exe" : "go";
 const managerPath = path.join(backend, "choobs-core-manager.exe");
 const singBoxPath = path.join(root, "core", "bin", "sing-box.exe");
+const xrayPath = path.join(root, "core", "bin", "xray.exe");
+const coreHashesPath = path.join(backend, "core-hashes.json");
 const appOutputPath = path.join(root, "dist", "win-unpacked");
+const packagedCoreHashesPath = path.join(appOutputPath, "resources", "backend", "core-hashes.json");
 const payloadPath = path.join(root, "dist", ".choobs-runtime.zip");
 const bootstrapPath = path.join(root, "dist", ".Choobs-bootstrap.exe");
 const outputPath = path.join(root, "dist", "Choobs.exe");
@@ -18,8 +21,10 @@ const bootstrapIconResourcePath = path.join(
   "choobs-bootstrap",
   "choobs_windows_amd64.syso"
 );
-const iconPath = path.join(root, "assets", "icons", "choobs.ico");
-const expectedSingBoxHash = "99fb67d576d13fcdb9bf938f393a6d2016da306b9eff853dbdbc75e2092443cc";
+const iconPath = path.join(root, "build", "choobs.ico");
+const coreHashes = JSON.parse(fs.readFileSync(path.join(backend, "core-hashes.json"), "utf8"));
+const expectedSingBoxHash = coreHashes["sing-box"].sha256;
+const expectedXrayHash = coreHashes.xray.sha256;
 const applicationVersion = require("../package.json").version;
 const electronVersion = require("electron/package.json").version;
 const builderVersion = require("electron-builder/package.json").version;
@@ -98,12 +103,19 @@ function build() {
   if (!fs.existsSync(singBoxPath)) {
     throw new Error("Required Windows x64 sing-box binary is missing from core/bin/sing-box.exe.");
   }
+  if (!fs.existsSync(xrayPath)) {
+    throw new Error("Required verified Xray 24.11.30 binary is missing from core/bin/xray.exe.");
+  }
   if (!fs.existsSync(iconPath)) {
-    throw new Error("Required Windows application icon is missing from assets/icons/choobs.ico.");
+    throw new Error("Required Windows application icon is missing from build/choobs.ico.");
   }
   const singBoxHash = crypto.createHash("sha256").update(fs.readFileSync(singBoxPath)).digest("hex");
   if (singBoxHash !== expectedSingBoxHash) {
     throw new Error("core/bin/sing-box.exe does not match the verified Windows 7 legacy binary checksum.");
+  }
+  const xrayHash = crypto.createHash("sha256").update(fs.readFileSync(xrayPath)).digest("hex");
+  if (xrayHash !== expectedXrayHash) {
+    throw new Error("core/bin/xray.exe does not match the verified Xray 24.11.30 Windows 7 binary checksum.");
   }
   if (!/\bgo1\.20\.14\b/.test(goVersion())) {
     throw new Error("Windows 7 portable builds require Go 1.20.14.");
@@ -130,7 +142,9 @@ function build() {
       path.join(appOutputPath, "Choobs.exe"),
       path.join(appOutputPath, "resources", "app.asar"),
       path.join(appOutputPath, "resources", "backend", "choobs-core-manager.exe"),
-      path.join(appOutputPath, "resources", "core", "bin", "sing-box.exe")
+      packagedCoreHashesPath,
+      path.join(appOutputPath, "resources", "core", "bin", "sing-box.exe"),
+      path.join(appOutputPath, "resources", "core", "bin", "xray.exe")
     ];
     const missingFiles = requiredFiles.filter((filePath) => !fs.existsSync(filePath));
     if (missingFiles.length) {
@@ -145,6 +159,19 @@ function build() {
     if (packagedSingBoxHash !== expectedSingBoxHash) {
       throw new Error("Packaged sing-box does not match the verified Windows 7 legacy binary.");
     }
+    const packagedXrayHash = crypto.createHash("sha256")
+      .update(fs.readFileSync(path.join(appOutputPath, "resources", "core", "bin", "xray.exe")))
+      .digest("hex");
+    if (packagedXrayHash !== expectedXrayHash) {
+      throw new Error("Packaged Xray does not match the verified Xray 24.11.30 Windows 7 binary.");
+    }
+    const expectedCoreHashesHash = crypto.createHash("sha256").update(fs.readFileSync(coreHashesPath)).digest("hex");
+    const packagedCoreHashesHash = crypto.createHash("sha256")
+      .update(fs.readFileSync(packagedCoreHashesPath))
+      .digest("hex");
+    if (packagedCoreHashesHash !== expectedCoreHashesHash) {
+      throw new Error("Packaged core hash manifest does not match backend/core-hashes.json.");
+    }
 
     const packer = ["run", "-C", backend, "./cmd/choobs-pack"];
     const payloadHash = runCapture(go, [
@@ -153,11 +180,11 @@ function build() {
     if (!/^[a-f0-9]{64}$/.test(payloadHash)) {
       throw new Error("Runtime packager returned an invalid SHA-256 value.");
     }
-    run(go, [...packer, "verify", "-payload", payloadPath], {
+    run(go, [...packer, "verify", "-payload", payloadPath, "-xray-sha256", expectedXrayHash], {
       env: { ...process.env, GOTOOLCHAIN: "go1.20.14" }
     });
 
-    const ldflags = `-s -w -H=windowsgui -X main.expectedPayloadHash=${payloadHash} -X main.applicationVersion=${applicationVersion}`;
+    const ldflags = `-s -w -H=windowsgui -X main.expectedPayloadHash=${payloadHash} -X main.expectedXraySHA256=${expectedXrayHash} -X main.applicationVersion=${applicationVersion}`;
     run(go, [
       "run",
       "github.com/akavel/rsrc@v0.10.2",
@@ -189,7 +216,8 @@ function build() {
       "verify-executable",
       "-executable", outputPath,
       "-sha256", payloadHash,
-      "-sing-box-sha256", expectedSingBoxHash
+      "-sing-box-sha256", expectedSingBoxHash,
+      "-xray-sha256", expectedXrayHash
     ], { env: { ...process.env, GOTOOLCHAIN: "go1.20.14" } });
     verifyWindowsX64GuiExecutable(outputPath);
     console.log(`Single-file Windows x64 Choobs executable created: ${path.relative(root, outputPath)}`);

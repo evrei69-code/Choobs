@@ -38,14 +38,19 @@ func newApplicationManager(executablePath string) (*CoreManager, error) {
 	coreDirectory := filepath.Join(root, "core")
 	dataCoreDirectory := filepath.Join(dataDirectory, "core")
 	executableName := "sing-box"
+	xrayExecutableName := "xray"
 	if runtime.GOOS == "windows" {
 		executableName += ".exe"
+		xrayExecutableName += ".exe"
 	}
 	paths := ManagerPaths{
-		SingBoxExecutable: filepath.Join(coreDirectory, "bin", executableName),
-		ConfigFile:        filepath.Join(dataCoreDirectory, "configs", "runtime.json"),
-		LogFile:           filepath.Join(dataCoreDirectory, "logs", "sing-box.log"),
-		ProxyStateFile:    filepath.Join(dataDirectory, "system-proxy-session.json"),
+		SingBoxExecutable:    filepath.Join(coreDirectory, "bin", executableName),
+		XrayExecutable:       filepath.Join(coreDirectory, "bin", xrayExecutableName),
+		XrayStagingDirectory: filepath.Join(dataCoreDirectory, "xray-runtime"),
+		ConfigFile:           filepath.Join(dataCoreDirectory, "configs", "runtime.json"),
+		LogFile:              filepath.Join(dataCoreDirectory, "logs", "sing-box.log"),
+		XrayLogFile:          filepath.Join(dataCoreDirectory, "logs", "xray.log"),
+		ProxyStateFile:       filepath.Join(dataDirectory, "system-proxy-session.json"),
 	}
 	if err := os.Remove(paths.ConfigFile); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("could not clear stale runtime config")

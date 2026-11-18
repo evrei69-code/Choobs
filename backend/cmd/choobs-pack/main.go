@@ -59,11 +59,12 @@ func appendPayload(args []string) {
 func verify(args []string) {
 	flags := flag.NewFlagSet("verify", flag.ExitOnError)
 	payload := flags.String("payload", "", "runtime payload ZIP to verify and extract")
+	xrayHash := flags.String("xray-sha256", "", "expected Xray 24.11.30 SHA-256")
 	_ = flags.Parse(args)
-	if *payload == "" {
-		fail("verify requires payload")
+	if *payload == "" || *xrayHash == "" {
+		fail("verify requires payload and xray-sha256")
 	}
-	if err := singlefile.VerifyArchiveFile(*payload); err != nil {
+	if err := singlefile.VerifyArchiveFile(*payload, *xrayHash); err != nil {
 		fail(err.Error())
 	}
 	fmt.Println("embedded runtime archive verified and extracted successfully")
@@ -74,11 +75,12 @@ func verifyExecutable(args []string) {
 	executable := flags.String("executable", "", "single-file Choobs executable")
 	hash := flags.String("sha256", "", "expected embedded payload SHA-256")
 	singBoxHash := flags.String("sing-box-sha256", "", "expected sing-box SHA-256")
+	xrayHash := flags.String("xray-sha256", "", "expected Xray 24.11.30 SHA-256")
 	_ = flags.Parse(args)
-	if *executable == "" || *hash == "" || *singBoxHash == "" {
-		fail("verify-executable requires executable, sha256, and sing-box-sha256")
+	if *executable == "" || *hash == "" || *singBoxHash == "" || *xrayHash == "" {
+		fail("verify-executable requires executable, sha256, sing-box-sha256, and xray-sha256")
 	}
-	if err := singlefile.VerifyExecutable(*executable, *hash, *singBoxHash); err != nil {
+	if err := singlefile.VerifyExecutable(*executable, *hash, *singBoxHash, *xrayHash); err != nil {
 		fail(err.Error())
 	}
 	fmt.Println("single-file executable payload and required runtime files verified")

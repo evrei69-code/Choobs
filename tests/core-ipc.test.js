@@ -79,7 +79,12 @@ test("preload exposes restricted core IPC and main validates the stored server",
       displayBalloon(value) { this.balloons.push(value); }
       destroy() {}
     },
-    nativeImage: { createFromPath: (value) => value },
+    nativeImage: {
+      createFromPath: (value) => ({
+        path: value,
+        isEmpty: () => !fs.existsSync(value)
+      })
+    },
     dialog: {
       showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
       showSaveDialog: async () => ({ canceled: false, filePath: diagnosticPath }),
@@ -275,7 +280,7 @@ test("preload exposes restricted core IPC and main validates the stored server",
   assert.equal(stopped.state, "stopped");
   assert.equal(trayInstances.length, 1);
   assert.equal(trayInstances[0].tooltip, "Choobs");
-  assert.equal(trayInstances[0].icon, path.join(applicationDirectory, "assets", "icons", "choobs-32.png"));
+  assert.equal(trayInstances[0].icon.path, path.join(applicationDirectory, "assets", "icons", "choobs-32.png"));
   assert.equal(browserWindows[0].options.icon, path.join(applicationDirectory, "assets", "icons", "choobs.ico"));
 
   let trayStatus;

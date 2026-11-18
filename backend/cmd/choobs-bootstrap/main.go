@@ -8,10 +8,11 @@ import (
 )
 
 var expectedPayloadHash = ""
+var expectedXraySHA256 = ""
 var applicationVersion = "0.1.0"
 
 func main() {
-	if err := singlefile.Run(expectedPayloadHash, applicationVersion); err != nil {
+	if err := singlefile.Run(expectedPayloadHash, expectedXraySHA256, applicationVersion); err != nil {
 		showError("Choobs could not start. " + err.Error())
 		os.Exit(1)
 	}

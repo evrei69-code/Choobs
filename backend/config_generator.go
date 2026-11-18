@@ -36,7 +36,7 @@ type runtimeRoute struct {
 
 func GenerateRuntimeConfig(server ServerInput, listenPorts ...uint16) ([]byte, []string, error) {
 	if server.Protocol != "VLESS" {
-		return nil, nil, fmt.Errorf("%s configuration is not implemented yet; only VLESS is supported", server.Protocol)
+		return nil, nil, fmt.Errorf("only VLESS configuration is supported")
 	}
 	if strings.TrimSpace(server.Address) == "" || server.Port < 1 || server.Port > 65535 {
 		return nil, nil, fmt.Errorf("server address or port is invalid")
@@ -100,7 +100,7 @@ func GenerateRuntimeConfig(server ServerInput, listenPorts ...uint16) ([]byte, [
 	}
 	for key := range query {
 		if !supportedParameters[key] {
-			return nil, nil, fmt.Errorf("Unsupported VLESS parameter: %s", key)
+			return nil, nil, fmt.Errorf("VLESS URI contains an unsupported parameter")
 		}
 	}
 	for _, key := range []string{"encryption", "flow", "security", "sni", "serverName", "type", "headerType", "host", "path", "serviceName", "pbk", "sid", "publicKey", "shortId", "spiderX", "fp"} {
@@ -117,14 +117,14 @@ func GenerateRuntimeConfig(server ServerInput, listenPorts ...uint16) ([]byte, [
 		return nil, nil, err
 	}
 	if value := query.Get("encryption"); value != "" && value != "none" {
-		return nil, nil, fmt.Errorf("VLESS encryption %q is not supported", value)
+		return nil, nil, fmt.Errorf("VLESS encryption is not supported")
 	}
 	network := query.Get("type")
 	if network != "" && network != "tcp" {
-		return nil, nil, fmt.Errorf("VLESS transport %q is not implemented yet", network)
+		return nil, nil, fmt.Errorf("VLESS transport is not implemented yet")
 	}
 	if headerType := query.Get("headerType"); headerType != "" && headerType != "none" {
-		return nil, nil, fmt.Errorf("VLESS header type %q is not implemented yet", headerType)
+		return nil, nil, fmt.Errorf("VLESS header type is not implemented yet")
 	}
 	for _, unsupported := range []string{"host", "path", "serviceName", "spiderX"} {
 		if query.Get(unsupported) != "" {
@@ -134,7 +134,7 @@ func GenerateRuntimeConfig(server ServerInput, listenPorts ...uint16) ([]byte, [
 
 	security := query.Get("security")
 	if security != "" && security != "none" && security != "tls" && security != "reality" {
-		return nil, nil, fmt.Errorf("VLESS security mode %q is not implemented yet", security)
+		return nil, nil, fmt.Errorf("VLESS security mode is not implemented yet")
 	}
 	serverName := query.Get("sni")
 	if query.Get("serverName") != "" {
@@ -149,7 +149,7 @@ func GenerateRuntimeConfig(server ServerInput, listenPorts ...uint16) ([]byte, [
 
 	flow := query.Get("flow")
 	if flow != "" && flow != "xtls-rprx-vision" {
-		return nil, nil, fmt.Errorf("VLESS flow %q is not supported", flow)
+		return nil, nil, fmt.Errorf("VLESS flow is not supported")
 	}
 	if flow != "" && security != "reality" {
 		return nil, nil, fmt.Errorf("VLESS flow requires Reality security")

@@ -232,12 +232,15 @@ func extractArchive(archive *zip.Reader, manifest Manifest, destination string) 
 	return nil
 }
 
-func EnsureRuntime(archive *zip.Reader, expectedHash, applicationVersion, userDirectory string) (string, error) {
+func EnsureRuntime(archive *zip.Reader, expectedHash, expectedXraySHA256, applicationVersion, userDirectory string) (string, error) {
 	if len(expectedHash) < 16 || applicationVersion == "" {
 		return "", errors.New("Choobs runtime identity is invalid")
 	}
 	manifest, err := embeddedManifest(archive)
 	if err != nil {
+		return "", err
+	}
+	if err := verifyExpectedXrayHash(manifest, expectedXraySHA256); err != nil {
 		return "", err
 	}
 	if err := validateArchive(archive, manifest); err != nil {
@@ -278,7 +281,7 @@ func EnsureRuntime(archive *zip.Reader, expectedHash, applicationVersion, userDi
 	return destination, nil
 }
 
-func Run(expectedHash, applicationVersion string) error {
+func Run(expectedHash, expectedXraySHA256, applicationVersion string) error {
 	if runtime.GOOS != "windows" || runtime.GOARCH != "amd64" {
 		return errors.New("this Choobs portable executable requires Windows x64")
 	}
@@ -298,7 +301,7 @@ func Run(expectedHash, applicationVersion string) error {
 			return errors.New("could not locate the current user's application data directory")
 		}
 	}
-	runtimeDirectory, err := EnsureRuntime(archive, expectedHash, applicationVersion, userDirectory)
+	runtimeDirectory, err := EnsureRuntime(archive, expectedHash, expectedXraySHA256, applicationVersion, userDirectory)
 	if err != nil {
 		return err
 	}
@@ -317,7 +320,7 @@ func Run(expectedHash, applicationVersion string) error {
 	return nil
 }
 
-func VerifyArchiveFile(archivePath string) error {
+func VerifyArchiveFile(archivePath, expectedXraySHA256 string) error {
 	reader, err := zip.OpenReader(archivePath)
 	if err != nil {
 		return fmt.Errorf("open packaged runtime archive: %w", err)
@@ -325,6 +328,9 @@ func VerifyArchiveFile(archivePath string) error {
 	defer reader.Close()
 	manifest, err := embeddedManifest(&reader.Reader)
 	if err != nil {
+		return err
+	}
+	if err := verifyExpectedXrayHash(manifest, expectedXraySHA256); err != nil {
 		return err
 	}
 	if err := validateArchive(&reader.Reader, manifest); err != nil {
@@ -341,7 +347,7 @@ func VerifyArchiveFile(archivePath string) error {
 	return verifyDirectory(temporary, manifest)
 }
 
-func VerifyExecutable(executablePath, expectedHash, expectedSingBoxHash string) error {
+func VerifyExecutable(executablePath, expectedHash, expectedSingBoxHash, expectedXraySHA256 string) error {
 	archive, archiveFile, err := readFooter(executablePath, expectedHash)
 	if err != nil {
 		return err
@@ -353,6 +359,9 @@ func VerifyExecutable(executablePath, expectedHash, expectedSingBoxHash string) 
 	}
 	if !strings.EqualFold(manifest.Files["resources/core/bin/sing-box.exe"], expectedSingBoxHash) {
 		return errors.New("embedded sing-box binary does not match the verified legacy build")
+	}
+	if err := verifyExpectedXrayHash(manifest, expectedXraySHA256); err != nil {
+		return err
 	}
 	if err := validateArchive(archive, manifest); err != nil {
 		return err
@@ -374,11 +383,25 @@ func verifyRequiredFiles(manifest Manifest) error {
 		"resources/app.asar",
 		"resources/backend/choobs-core-manager.exe",
 		"resources/core/bin/sing-box.exe",
+		"resources/core/bin/xray.exe",
 	}
 	for _, name := range required {
 		if _, ok := manifest.Files[name]; !ok {
 			return errors.New("embedded runtime is missing a required application component")
 		}
+	}
+	return nil
+}
+
+func verifyExpectedXrayHash(manifest Manifest, expected string) error {
+	if len(expected) != sha256.Size*2 {
+		return errors.New("verified Xray checksum is invalid")
+	}
+	if _, err := hex.DecodeString(expected); err != nil {
+		return errors.New("verified Xray checksum is invalid")
+	}
+	if !strings.EqualFold(manifest.Files["resources/core/bin/xray.exe"], expected) {
+		return errors.New("embedded Xray binary does not match the verified Xray 24.11.30 release")
 	}
 	return nil
 }

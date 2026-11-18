@@ -4,8 +4,11 @@
   "description": "Choobs VPN client for Windows 7",
   "main": "main.js",
   "scripts": {
+    "prestart": "node scripts/build-core-manager.js",
     "start": "electron .",
     "preview": "node scripts/preview-server.js",
+    "build:win": "node scripts/build-installer.js",
+    "build:portable": "node scripts/build-portable.js",
     "build:win:portable": "node scripts/build-portable.js",
     "test:ipc": "node --test tests/core-ipc.test.js",
     "test:subscriptions": "node --test tests/subscriptions.test.js",
@@ -21,7 +24,11 @@
   "build": {
     "appId": "com.choobs.desktop",
     "productName": "Choobs",
+    "executableName": "Choobs",
     "asar": true,
+    "asarUnpack": [
+      "assets/icons/**/*"
+    ],
     "directories": {
       "output": "dist"
     },
@@ -39,8 +46,16 @@
         "to": "backend/choobs-core-manager.exe"
       },
       {
+        "from": "backend/core-hashes.json",
+        "to": "backend/core-hashes.json"
+      },
+      {
         "from": "core/bin/sing-box.exe",
         "to": "core/bin/sing-box.exe"
+      },
+      {
+        "from": "core/bin/xray.exe",
+        "to": "core/bin/xray.exe"
       },
       {
         "from": "core/configs",
@@ -51,16 +66,27 @@
       }
     ],
     "win": {
-      "icon": "assets/icons/choobs.ico",
+      "icon": "build/choobs.ico",
       "signExecutable": false,
       "target": [
         {
-          "target": "dir",
+          "target": "nsis",
           "arch": [
             "x64"
           ]
         }
       ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "Choobs",
+      "installerIcon": "build/choobs.ico",
+      "uninstallerIcon": "build/choobs.ico",
+      "deleteAppDataOnUninstall": false,
+      "artifactName": "Choobs-${version}-Setup.${ext}"
     }
   }
 }
