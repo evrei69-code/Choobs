@@ -135,7 +135,9 @@ function build() {
       path.join(root, "node_modules", "electron-builder", "cli.js"),
       "--win",
       "dir",
-      "--x64"
+      "--x64",
+      "--publish",
+      "never"
     ]);
 
     const requiredFiles = [

@@ -356,22 +356,16 @@ func (manager *CoreManager) start(server ServerInput) CoreStatus {
 	go manager.wait(command, done, logFile)
 	manager.mu.Unlock()
 
-	if logger != nil {
-		_, _ = io.WriteString(logger, "[CORE] "+coreName+" started\n")
-	}
+	_, _ = io.WriteString(logger, "[CORE] "+coreName+" started\n")
 	if err := waitForProxy(proxyPort, done, manager.proxyReady); err != nil {
 		return manager.failAndStop(command, "PROXY_NOT_READY", errors.New("Local proxy did not start."))
 	}
-	if logger != nil {
-		_, _ = io.WriteString(logger, "[PROXY] Local proxy listening\n")
-	}
+	_, _ = io.WriteString(logger, "[PROXY] Local proxy listening\n")
 	externalIP, err := checkExternalIP(proxyPort, manager.checkProxy)
 	if err != nil {
 		return manager.failAndStop(command, "CONNECTIVITY_FAILED", errors.New("Could not verify an Internet connection through the VPN proxy."))
 	}
-	if logger != nil {
-		_, _ = io.WriteString(logger, "[PROXY] Proxy health check passed\n")
-	}
+	_, _ = io.WriteString(logger, "[PROXY] Proxy health check passed\n")
 
 	manager.mu.Lock()
 	if manager.command != command || manager.state != "starting" {

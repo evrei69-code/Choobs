@@ -52,6 +52,12 @@ test("installer and portable builders enforce the pinned Xray executable hash", 
   }
 });
 
+test("Installer and Portable electron-builder invocations disable publishing", () => {
+  for (const script of [installerScript, portableScript]) {
+    assert.match(script, /"--publish",\s*"never"/);
+  }
+});
+
 test("npm start rebuilds the Core Manager locally before launching Electron", () => {
   assert.equal(packageConfig.scripts.prestart, "node scripts/build-core-manager.js");
   assert.match(developmentBuildScript, /spawnSync\(["']go["']/);

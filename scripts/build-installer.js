@@ -87,7 +87,9 @@ function build() {
     path.join(root, "node_modules", "electron-builder", "cli.js"),
     "--win",
     "nsis",
-    "--x64"
+    "--x64",
+    "--publish",
+    "never"
   ]);
 
   for (const [filePath, label] of [
