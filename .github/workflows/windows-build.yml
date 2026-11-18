@@ -63,11 +63,13 @@ jobs:
           Invoke-WebRequest -Uri $manifest.xray.releaseUrl -OutFile $xrayArchive
           Invoke-WebRequest -Uri $xrayChecksumPath -OutFile $xrayChecksumFile
           $checksumText = Get-Content $xrayChecksumFile -Raw
-          if ($checksumText -notmatch '(?im)^\s*SHA2-256\(Xray-win7-64\.zip\)\s*=\s*([a-f0-9]{64})\s*$') {
+          $checksumMatch = [regex]::Match($checksumText, '(?im)^\s*SHA2-256\s*=\s*([a-f0-9]{64})\s*$')
+          if (-not $checksumMatch.Success) {
             throw "The official Xray release checksum file has an invalid format."
           }
+          $officialArchiveHash = $checksumMatch.Groups[1].Value.ToLowerInvariant()
           $archiveHash = (Get-FileHash -LiteralPath $xrayArchive -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($archiveHash -ne $Matches[1].ToLowerInvariant()) {
+          if ($archiveHash -ne $officialArchiveHash) {
             throw "The Xray archive does not match the official release checksum."
           }
           Expand-Archive -LiteralPath $xrayArchive -DestinationPath $xrayExtract
